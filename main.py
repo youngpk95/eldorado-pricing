@@ -20,7 +20,7 @@ import config
 from eldo_auth import EldoradoAuth
 from eldorado_api import EldoradoClient
 from models import ProductRow
-from product_pipeline import process_product
+from product_pipeline import RowConfig, process_product
 from sheets_client import SheetsClient
 
 logging.basicConfig(
@@ -30,7 +30,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def run_one_cycle(sheets: SheetsClient, client: EldoradoClient, semaphore: asyncio.Semaphore) -> None:
+def _compute_loop_delay(rows: list[ProductRow]) -> float:
+    """Relax (giây nghỉ sau khi xong CẢ vòng) là cấu hình chung cho toàn bộ
+    vòng chạy, đọc từ cột RELAX_SECONDS — nếu nhiều sản phẩm đang bật có số
+    khác nhau, lấy số LỚN NHẤT (an toàn hơn, không sản phẩm nào bị chạy dày
+    hơn ý muốn). Để trống hết thì dùng mặc định config.LOOP_DELAY_SECONDS."""
+    relax_values = [
+        cfg.relax_seconds
+        for cfg in (RowConfig(r) for r in rows)
+        if cfg.enabled and cfg.relax_seconds is not None
+    ]
+    return max(relax_values) if relax_values else config.LOOP_DELAY_SECONDS
+
+
+async def run_one_cycle(sheets: SheetsClient, client: EldoradoClient, semaphore: asyncio.Semaphore) -> float:
     raw_rows = await asyncio.to_thread(sheets.read_config_rows)
     rows = [ProductRow(index=i, raw=raw) for i, raw in enumerate(raw_rows)]
     logger.info("Có %d sản phẩm trong sheet.", len(rows))
@@ -42,6 +55,7 @@ async def run_one_cycle(sheets: SheetsClient, client: EldoradoClient, semaphore:
                 await asyncio.sleep(config.PRODUCT_DELAY_SECONDS)
 
     await asyncio.gather(*(guarded(row) for row in rows))
+    return _compute_loop_delay(rows)
 
 
 async def main() -> None:
@@ -54,13 +68,14 @@ async def main() -> None:
     try:
         while True:
             started = asyncio.get_event_loop().time()
+            loop_delay = config.LOOP_DELAY_SECONDS
             try:
-                await run_one_cycle(sheets, client, semaphore)
+                loop_delay = await run_one_cycle(sheets, client, semaphore)
             except Exception:
                 logger.exception("Lỗi ở 1 chu kỳ chạy — bỏ qua, thử lại chu kỳ sau.")
             elapsed = asyncio.get_event_loop().time() - started
-            logger.info("Hoàn tất 1 chu kỳ trong %.1fs. Nghỉ %ss...", elapsed, config.LOOP_DELAY_SECONDS)
-            await asyncio.sleep(config.LOOP_DELAY_SECONDS)
+            logger.info("Hoàn tất 1 chu kỳ trong %.1fs. Nghỉ %ss...", elapsed, loop_delay)
+            await asyncio.sleep(loop_delay)
     finally:
         await client.aclose()
 

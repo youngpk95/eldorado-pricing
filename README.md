@@ -44,7 +44,7 @@ pip install pytest pytest-asyncio
 pytest tests/ -v
 ```
 
-## Cấu trúc cột sheet (schema PHẲNG — 20 cột)
+## Cấu trúc cột sheet (schema PHẲNG — 21 cột)
 
 Không còn tham chiếu chéo sang sheet khác (khác thiết kế ban đầu của bản gốc)
 — mọi giá trị nằm THẲNG trong dòng sản phẩm, giống style tool G2G Repricer
@@ -52,7 +52,7 @@ sibling. Định nghĩa DUY NHẤT nằm trong `sheet_schema.py` (tên cột n�
 nhãn hiển thị tiếng Anh ngắn gọn ở dòng 1 + chú thích chi tiết gắn vào từng ô
 header — nhân viên rê chuột vào ô header trên Google Sheets sẽ thấy giải
 thích đầy đủ). Chạy `python scripts/setup_sheet_headers.py` để tự động thiết
-lập đúng 20 cột này cho 1 tab mới — script sẽ:
+lập đúng 21 cột này cho 1 tab mới — script sẽ:
 1. XOÁ SẠCH dữ liệu cũ trong tab (chỉ chạy khi chắc chắn muốn reset),
 2. Ghi nhãn + chú thích cho dòng 1,
 3. Đặt **checkbox thật** (Data Validation kiểu BOOLEAN) cho cột `Enabled`
@@ -64,14 +64,20 @@ sửa lại nhãn tiếng Việt cho dễ hiểu hơn nữa mà không sợ hỏ
 tự ý thêm/xoá/đổi thứ tự cột (muốn đổi thứ tự cột thật sự thì sửa
 `sheet_schema.py` rồi chạy lại script thiết lập).
 
-Xem đầy đủ 20 cột + giải thích trong `sheet_schema.py` (`COLUMNS`), hoặc mở
+Xem đầy đủ 21 cột + giải thích trong `sheet_schema.py` (`COLUMNS`), hoặc mở
 sheet thật và rê chuột vào từng ô header. Tóm tắt nhanh: `Enabled` (checkbox
 bật/tắt dòng), `Name`, 3 cột tool tự ghi (`Status`/`Updated At`/`New Link`),
 `My Listing URL`/`Compare URL`, `Stock`, `Price Min`/`Price Max`,
 `Discount`/`Round Decimals`/`Always Undercut` (checkbox), `Min Purchase
 Base`/`Min Purchase Step`, 3 cột lọc đối thủ (`Min Competitor Stock`, `Min
-Competitor Ratings`, `Min Feedback %`), `Seller Blacklist`, và `Allow
-Recreate on Rate Limit` (checkbox).
+Competitor Ratings`, `Min Feedback %`), `Seller Blacklist`, `Allow
+Recreate on Rate Limit` (checkbox), và `Relax (seconds)`.
+
+**Lưu ý về `Relax (seconds)`:** đây là cấu hình cho CẢ VÒNG CHẠY (nghỉ sau
+khi xong HẾT sản phẩm đang bật), không phải riêng 1 sản phẩm — nếu nhiều
+sản phẩm đang bật có số khác nhau, tool tự lấy số LỚN NHẤT
+(`main._compute_loop_delay`). Để trống ở mọi dòng thì dùng mặc định
+`LOOP_DELAY_SECONDS` trong `.env`.
 
 **Đã bỏ (theo yêu cầu 2026-09-13, không dùng tới hiện tại):** lọc đối thủ
 theo thời gian giao hàng (`Max Guaranteed/Average Delivery`), lọc theo từ

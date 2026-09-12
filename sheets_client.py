@@ -108,6 +108,32 @@ class SheetsClient:
         }
         self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body=request).execute()
 
+    def add_header_column(self, column_index: int, label: str, note: str) -> None:
+        """Ghi nhãn+chú thích cho ĐÚNG 1 cột header mới (0-based) — KHÔNG xoá
+        hay đụng tới bất kỳ dữ liệu nào khác. Dùng khi thêm 1 cột mới vào
+        schema đã có sẵn dữ liệu thật (khác `write_header_row_with_notes`,
+        vốn ghi đè+xoá TOÀN BỘ tab, chỉ nên dùng lúc thiết lập tab hoàn toàn
+        mới)."""
+        sheet_id = self._get_sheet_id()
+        request = {
+            "requests": [
+                {
+                    "updateCells": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 0,
+                            "endRowIndex": 1,
+                            "startColumnIndex": column_index,
+                            "endColumnIndex": column_index + 1,
+                        },
+                        "rows": [{"values": [{"userEnteredValue": {"stringValue": label}, "note": note}]}],
+                        "fields": "userEnteredValue,note",
+                    }
+                }
+            ]
+        }
+        self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body=request).execute()
+
     def set_checkbox_columns(self, column_indices: list[int], num_rows: int = 1000) -> None:
         """Đặt Data Validation kiểu BOOLEAN (checkbox thật) cho các cột
         boolean (0-based, vd ENABLED=0) từ dòng 2 trở đi — nhân viên tích/bỏ

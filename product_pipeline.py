@@ -127,6 +127,14 @@ class RowConfig:
     def create_new_enabled(self) -> bool:
         return _is_checked(self.row.get("ALLOW_RECREATE_ON_RATE_LIMIT"))
 
+    @property
+    def relax_seconds(self) -> int | None:
+        """Cấu hình cho CẢ VÒNG CHẠY (nghỉ sau khi xong hết sản phẩm), không
+        phải riêng dòng này — xem main.py nơi tổng hợp giá trị lớn nhất giữa
+        mọi sản phẩm đang bật. None nếu để trống (dùng mặc định .env)."""
+        v = self.row.get("RELAX_SECONDS")
+        return _to_int(v, None) if v else None
+
 
 async def _write_result(sheets: SheetsClient, index: int, note: str, link: str | None) -> None:
     """SheetsClient dùng googleapiclient đồng bộ — chạy trong thread pool mặc

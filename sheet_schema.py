@@ -28,6 +28,7 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("COMPETITOR_MIN_FEEDBACK_PERCENT", "Min Feedback %", "Bỏ qua đối thủ có % feedback thấp hơn số này — để trống nếu không lọc."),
     ("SELLER_BLACKLIST", "Seller Blacklist", "Tên seller luôn bị loại khỏi so sánh (cách nhau bằng dấu ;). Tool tự động loại thêm 'CNLTeam' dù không ghi ở đây."),
     ("ALLOW_RECREATE_ON_RATE_LIMIT", "Allow Recreate on Rate Limit", "Tích: cho phép tool tự xoá + tạo lại offer khi Eldorado báo lỗi quá tải (429). Bỏ tích: nếu gặp lỗi 429, tool chỉ báo lỗi ở Status và thử lại ở chu kỳ sau, không tự xoá/tạo lại."),
+    ("RELAX_SECONDS", "Relax (seconds)", "Số giây NGHỈ sau khi chạy xong HẾT TẤT CẢ sản phẩm đang bật, trước khi bắt đầu vòng chạy tiếp theo — đây là cấu hình cho CẢ VÒNG CHẠY, không phải riêng sản phẩm này. Nếu nhiều sản phẩm đang bật có số khác nhau, tool lấy số LỚN NHẤT. Để trống = dùng mặc định trong .env (LOOP_DELAY_SECONDS)."),
 ]
 
 INTERNAL_KEYS: list[str] = [key for key, _, _ in COLUMNS]
