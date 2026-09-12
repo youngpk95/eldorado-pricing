@@ -1,0 +1,33 @@
+"""Định nghĩa DUY NHẤT 1 nơi cho toàn bộ cấu trúc cột sheet config sản phẩm:
+(internal_key, nhãn hiển thị tiếng Anh ngắn gọn, chú thích tiếng Việt).
+
+QUAN TRỌNG: `sheets_client.read_config_rows()` đọc dữ liệu theo THỨ TỰ CỘT
+(vị trí), KHÔNG theo chữ hiển thị ở dòng 1 — nên đổi nhãn/chú thích cho dễ
+hiểu hơn KHÔNG BAO GIỜ làm hỏng code đọc dữ liệu, miễn thứ tự cột (danh sách
+này) giữ nguyên. Nếu cần thêm/bớt/đổi thứ tự cột thật sự, phải chạy lại
+`scripts/setup_sheet_headers.py` để đồng bộ lại sheet."""
+
+COLUMNS: list[tuple[str, str, str]] = [
+    ("ENABLED", "Enabled", "Tích để tool xử lý dòng này; bỏ tích để bỏ qua. Nếu tích mà vẫn không chạy, kiểm tra Status — có thể do thiếu My Listing URL hoặc Compare URL."),
+    ("NAME", "Name", "Tên gợi nhớ, chỉ để bạn dễ nhận biết — không ảnh hưởng tool."),
+    ("LAST_STATUS", "Status", "Tool TỰ GHI kết quả lần chạy gần nhất — không nhập tay."),
+    ("LAST_UPDATED_AT", "Updated At", "Tool TỰ GHI thời gian chạy gần nhất — không nhập tay."),
+    ("NEW_OFFER_LINK", "New Link", "Tool TỰ GHI nếu phải tạo lại offer mới (khi Eldorado báo lỗi 429) — không nhập tay."),
+    ("OWN_LISTING_URL", "My Listing URL", "Link tới offer CỦA BẠN trên Eldorado (vào Dashboard > Offers, copy link offer đó)."),
+    ("COMPARE_URL", "Compare URL", "Copy link trang sản phẩm đó trên Eldorado (trang khách xem, có danh sách mọi seller) để tool so giá."),
+    ("STOCK", "Stock", "Số lượng bạn thực sự đang có để bán."),
+    ("PRICE_MIN", "Price Min", "Giá thấp nhất cho phép bán. QUAN TRỌNG: nếu để TRỐNG, tool sẽ KHÔNG bám giá đối thủ nữa cho dòng này (giá đứng yên hoặc nhảy thẳng lên Price Max nếu có) — muốn 'không giới hạn giá sàn' mà vẫn bám giá đối thủ bình thường thì điền 0, đừng để trống."),
+    ("PRICE_MAX", "Price Max", "Giá cao nhất cho phép bán — để trống nếu không muốn giới hạn. Lưu ý: nếu dòng này thiếu Price Min hoặc không có đối thủ hợp lệ, tool có thể đặt giá THẲNG bằng đúng số này, không chỉ dùng làm giới hạn trên."),
+    ("DISCOUNT_AMOUNT", "Discount", "Số tiền trừ khỏi giá đối thủ rẻ nhất khi tính giá bám theo họ (vd 0.01 = rẻ hơn họ 1 cent)."),
+    ("ROUND_DECIMALS", "Round Decimals", "Làm tròn giá XUỐNG còn bao nhiêu số sau dấu phẩy (vd 2 = tới từng cent)."),
+    ("ALWAYS_UNDERCUT", "Always Undercut", "Tích: luôn hạ giá theo đối thủ kể cả khi mình đang rẻ hơn họ. Bỏ tích: giữ nguyên giá nếu mình đã rẻ hơn rồi."),
+    ("MIN_PURCHASE_BASE", "Min Purchase Base", "Giá trị (USD) tối thiểu của 1 đơn hàng — để trống nếu không cần tự tính lại số lượng mua tối thiểu."),
+    ("MIN_PURCHASE_COEF", "Min Purchase Step", "Số lượng mua tối thiểu sẽ được làm tròn lên tới bội số của số này."),
+    ("COMPETITOR_STOCK_MIN", "Min Competitor Stock", "Bỏ qua đối thủ có tồn kho thấp hơn số này khi so giá — để trống nếu không lọc."),
+    ("COMPETITOR_MIN_RATING_COUNT", "Min Competitor Ratings", "Bỏ qua đối thủ có ít lượt đánh giá hơn số này — để trống nếu không lọc."),
+    ("COMPETITOR_MIN_FEEDBACK_PERCENT", "Min Feedback %", "Bỏ qua đối thủ có % feedback thấp hơn số này — để trống nếu không lọc."),
+    ("SELLER_BLACKLIST", "Seller Blacklist", "Tên seller luôn bị loại khỏi so sánh (cách nhau bằng dấu ;). Tool tự động loại thêm 'CNLTeam' dù không ghi ở đây."),
+    ("ALLOW_RECREATE_ON_RATE_LIMIT", "Allow Recreate on Rate Limit", "Tích: cho phép tool tự xoá + tạo lại offer khi Eldorado báo lỗi quá tải (429). Bỏ tích: nếu gặp lỗi 429, tool chỉ báo lỗi ở Status và thử lại ở chu kỳ sau, không tự xoá/tạo lại."),
+]
+
+INTERNAL_KEYS: list[str] = [key for key, _, _ in COLUMNS]

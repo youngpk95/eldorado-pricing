@@ -1,0 +1,222 @@
+"""Xử lý 1 sản phẩm/1 chu kỳ — port từ checkupdate.py + phần tương ứng trong
+main.py process_product (bản gốc), đã bỏ G2G/FunPay VÀ bỏ hẳn cơ chế tham
+chiếu chéo sheet khác (mọi giá trị nằm thẳng trong dòng — schema phẳng giống
+tool G2G Repricer sibling, theo yêu cầu user 2026-09-13)."""
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+
+import config
+import eldorado_api as eldo
+import pricing
+import writer
+from eldorado_api import EldoradoClient, EldoradoApiError
+from models import ProductRow
+from sheets_client import SheetsClient
+
+logger = logging.getLogger(__name__)
+
+
+def _to_decimal(value: str, default: Decimal | None = None) -> Decimal | None:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        return Decimal(str(value).strip())
+    except InvalidOperation:
+        return default
+
+
+def _to_int(value: str, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return default
+
+
+def _is_checked(value: str) -> bool:
+    """Dùng chung cho mọi cột checkbox thật (Data Validation BOOLEAN) —
+    Sheets API trả về chuỗi "TRUE"/"FALSE", không phải "1"/"0"; vẫn chấp
+    nhận cả "1" để không phụ thuộc 1 định dạng duy nhất (vd nếu ai đó gõ tay
+    thay vì tích checkbox)."""
+    return (value or "").strip().upper() in ("TRUE", "1")
+
+
+@dataclass
+class RowConfig:
+    """Đọc + gõ kiểu mọi cột cần dùng của 1 dòng sheet — schema PHẲNG, mọi
+    giá trị nằm thẳng trong dòng này, không còn tham chiếu chéo sheet khác."""
+
+    row: ProductRow
+
+    @property
+    def is_checked_enabled(self) -> bool:
+        return _is_checked(self.row.get("ENABLED"))
+
+    @property
+    def enabled(self) -> bool:
+        return self.is_checked_enabled and bool(self.row.get("OWN_LISTING_URL")) and bool(self.row.get("COMPARE_URL"))
+
+    @property
+    def name(self) -> str:
+        return self.row.get("NAME") or f"row{self.row.index + 1}"
+
+    @property
+    def own_listing_url(self) -> str:
+        return self.row.get("OWN_LISTING_URL")
+
+    @property
+    def compare_url(self) -> str:
+        return self.row.get("COMPARE_URL")
+
+    @property
+    def stock(self) -> int:
+        return _to_int(self.row.get("STOCK"), 0)
+
+    @property
+    def price_min(self) -> Decimal | None:
+        return _to_decimal(self.row.get("PRICE_MIN"))
+
+    @property
+    def price_max(self) -> Decimal | None:
+        return _to_decimal(self.row.get("PRICE_MAX"))
+
+    @property
+    def discount_amount(self) -> Decimal:
+        return _to_decimal(self.row.get("DISCOUNT_AMOUNT"), Decimal(0))
+
+    @property
+    def round_decimals(self) -> int:
+        return _to_int(self.row.get("ROUND_DECIMALS"), 6)
+
+    @property
+    def always_undercut(self) -> bool:
+        return _is_checked(self.row.get("ALWAYS_UNDERCUT"))
+
+    @property
+    def min_purchase_base(self) -> Decimal | None:
+        return _to_decimal(self.row.get("MIN_PURCHASE_BASE"))
+
+    @property
+    def min_purchase_coef(self) -> Decimal:
+        return _to_decimal(self.row.get("MIN_PURCHASE_COEF"), Decimal(1))
+
+    @property
+    def competitor_stock_min(self) -> float | None:
+        v = self.row.get("COMPETITOR_STOCK_MIN")
+        return float(v) if v else None
+
+    @property
+    def competitor_min_rating_count(self) -> float | None:
+        v = self.row.get("COMPETITOR_MIN_RATING_COUNT")
+        return float(v) if v else None
+
+    @property
+    def competitor_min_feedback_percent(self) -> float | None:
+        v = self.row.get("COMPETITOR_MIN_FEEDBACK_PERCENT")
+        return float(v) if v else None
+
+    @property
+    def seller_blacklist(self) -> set[str]:
+        names = {n.strip() for n in self.row.get("SELLER_BLACKLIST").split(";") if n.strip()}
+        return names | {"CNLTeam"}  # luôn tự loại chính mình khỏi danh sách đối thủ
+
+    @property
+    def create_new_enabled(self) -> bool:
+        return _is_checked(self.row.get("ALLOW_RECREATE_ON_RATE_LIMIT"))
+
+
+async def _write_result(sheets: SheetsClient, index: int, note: str, link: str | None) -> None:
+    """SheetsClient dùng googleapiclient đồng bộ — chạy trong thread pool mặc
+    định của asyncio để không chặn event loop trong lúc chờ HTTP."""
+    await asyncio.to_thread(sheets.write_result, index, note, link)
+
+
+async def process_product(row: ProductRow, sheets: SheetsClient, client: EldoradoClient) -> None:
+    cfg = RowConfig(row)
+    if not cfg.is_checked_enabled:
+        return  # bỏ qua thật sự im lặng — đây là trạng thái "cố ý tắt", không phải lỗi
+    if not cfg.enabled:
+        # Đã tích Enabled nhưng thiếu link bắt buộc — trước đây bị bỏ qua
+        # HOÀN TOÀN im lặng (không ghi gì vào Status), khiến staff không
+        # biết vì sao dòng không bao giờ chạy. Giờ báo lỗi rõ ràng.
+        await _write_result(sheets, row.index, "Lỗi: đã tích Enabled nhưng thiếu My Listing URL hoặc Compare URL", None)
+        return
+
+    note_lines: list[str] = []
+    try:
+        offer_id, offer_type = eldo.parse_offer_link(cfg.own_listing_url)
+        if not offer_id:
+            await _write_result(sheets, row.index, "Lỗi: không đọc được offer_id từ OWN_LISTING_URL", None)
+            return
+
+        offer, urls = await client.get_own_offer(offer_id, offer_type)
+        compare_url = client.build_compare_url(offer, cfg.compare_url)
+
+        raw_competitors = await client.get_competitors(compare_url)
+        qualifying, below_floor = eldo.filter_competitors(
+            raw_competitors,
+            blacklist=cfg.seller_blacklist,
+            min_stock=cfg.competitor_stock_min,
+            min_feedback=cfg.competitor_min_rating_count,
+            tile_feedback=cfg.competitor_min_feedback_percent,
+            floor_price=cfg.price_min,
+        )
+        cheapest = eldo.pick_cheapest(qualifying)
+
+        new_price = pricing.calculate_new_price(
+            current_price=offer.price,
+            min_competitor_price=cheapest.price if cheapest else None,
+            discount_amount=cfg.discount_amount,
+            price_min=cfg.price_min,
+            price_max=cfg.price_max,
+            undercut_from_competitor=cfg.always_undercut,
+            round_decimals=cfg.round_decimals,
+        )
+
+        new_stock = cfg.stock
+        update_stock = new_stock != offer.quantity
+
+        new_min_qty = offer.min_quantity
+        if cfg.min_purchase_base is not None and new_price > 0:
+            new_min_qty = pricing.find_min_quantity(cfg.min_purchase_base, new_price, cfg.min_purchase_coef)
+
+        update_price = new_price != offer.price
+
+        note_lines.append(
+            f"Giá: {offer.price} -> {new_price} | Stock: {offer.quantity} -> {new_stock} | "
+            f"minQty: {offer.min_quantity} -> {new_min_qty}"
+        )
+        if cheapest:
+            note_lines.append(f"Đối thủ rẻ nhất hợp lệ: {cheapest.seller} = {cheapest.price}")
+        else:
+            note_lines.append("Không có đối thủ Eldorado nào đạt điều kiện để tính giá.")
+        if below_floor:
+            preview = ", ".join(f"{m.seller}={m.price}" for m in below_floor[:5])
+            note_lines.append(f"⚠️ {len(below_floor)} đối thủ giá THẤP HƠN giá sàn (bị loại khi tính giá): {preview}")
+
+        if not (update_price or update_stock or new_min_qty != offer.min_quantity):
+            note_lines.insert(0, "💤 Không có thay đổi.")
+            await _write_result(sheets, row.index, "\n".join(note_lines), None)
+            return
+
+        if config.DRY_RUN:
+            note_lines.insert(0, "[DRY RUN] Sẽ cập nhật (chưa ghi thật lên Eldorado).")
+            await _write_result(sheets, row.index, "\n".join(note_lines), None)
+            return
+
+        success, message, link = await writer.apply_update(
+            client, offer, urls, new_price, new_stock, new_min_qty,
+            price_changed=update_price, allow_create_new=True, create_new_enabled=cfg.create_new_enabled,
+        )
+        note_lines.insert(0, ("✅ " if success else "❌ ") + message)
+        await _write_result(sheets, row.index, "\n".join(note_lines), link)
+
+    except EldoradoApiError as e:
+        logger.error("[%s] Lỗi Eldorado API: %s", cfg.name, e)
+        await _write_result(sheets, row.index, f"Lỗi: {e}", None)
+    except Exception as e:
+        logger.exception("[%s] Lỗi không mong đợi khi xử lý sản phẩm", cfg.name)
+        await _write_result(sheets, row.index, f"Lỗi không xác định: {e}", None)
