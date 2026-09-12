@@ -85,16 +85,25 @@ async def apply_update(
     new_qty: int,
     new_min_qty: int,
     price_changed: bool,
+    only_price_changed: bool,
     allow_create_new: bool,
     create_new_enabled: bool,
 ) -> tuple[bool, str, str | None]:
-    """Trả về (thành công, mô tả, link offer mới nếu vừa tạo lại)."""
+    """Trả về (thành công, mô tả, link offer mới nếu vừa tạo lại).
+
+    `only_price_changed`: True CHỈ khi price_changed=True VÀ không có gì
+    khác (stock/minQty) cần đổi. QUAN TRỌNG (bug thật đã gặp 2026-09-13):
+    endpoint đổi giá riêng (`urls.change`) CHỈ đổi được giá — nếu vẫn ưu
+    tiên gọi endpoint này khi stock/minQty cũng cần đổi, và nó trả về 200,
+    hàm sẽ dừng lại tưởng đã xong trong khi stock/minQty chưa hề được gửi
+    lên Eldorado. Nên CHỈ được dùng đường tắt (đổi giá riêng, nhẹ hơn) khi
+    thực sự không có gì khác cần đổi cùng lúc."""
     details_payload = _build_details_payload(offer, new_price, new_qty, new_min_qty)
     price_only_payload = {"amount": float(new_price), "currency": "USD"}
 
     responses: list[httpx.Response] = []
 
-    if price_changed:
+    if only_price_changed:
         resp_price = await client.put(urls.change, price_only_payload)
         responses.append(resp_price)
         if resp_price.status_code == 200:
@@ -104,10 +113,13 @@ async def apply_update(
         if resp_full.status_code == 200:
             return True, "Cập nhật thành công (fallback: update đầy đủ)", None
     else:
+        # Giá VÀ/HOẶC stock/minQty đều cần đổi -> PHẢI dùng endpoint update
+        # đầy đủ (gửi cả 3 field 1 lần) — không dùng đường tắt đổi-giá-riêng
+        # ở đây, tránh bỏ sót stock/minQty như bug đã gặp.
         resp_full = await client.put(urls.update, details_payload)
         responses.append(resp_full)
         if resp_full.status_code == 200:
-            return True, "Cập nhật thành công (stock/thời gian/minQty)", None
+            return True, "Cập nhật thành công (đầy đủ: giá/stock/minQty)", None
 
     is_429 = any(r.status_code == 429 for r in responses)
     status_summary = ", ".join(f"{r.status_code}" for r in responses)

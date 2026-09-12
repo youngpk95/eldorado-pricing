@@ -57,7 +57,7 @@ async def test_normal_price_change_succeeds_without_touching_create():
 
     success, message, link = await apply_update(
         client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
-        price_changed=True, allow_create_new=True, create_new_enabled=True,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
     )
 
     assert success is True
@@ -78,7 +78,7 @@ async def test_429_triggers_single_recreate_with_new_price_and_returns_new_link(
 
     success, message, link = await apply_update(
         client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
-        price_changed=True, allow_create_new=True, create_new_enabled=True,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
     )
 
     assert success is True
@@ -105,7 +105,7 @@ async def test_429_then_create_also_fails_reports_clear_error_no_infinite_retry(
 
     success, message, link = await apply_update(
         client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
-        price_changed=True, allow_create_new=True, create_new_enabled=True,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
     )
 
     assert success is False
@@ -121,7 +121,7 @@ async def test_429_but_create_new_disabled_does_not_attempt_recreate():
 
     success, message, link = await apply_update(
         client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
-        price_changed=True, allow_create_new=True, create_new_enabled=False,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=False,
     )
 
     assert success is False
@@ -131,13 +131,51 @@ async def test_429_but_create_new_disabled_does_not_attempt_recreate():
 
 
 @pytest.mark.asyncio
+async def test_price_and_stock_both_changed_uses_full_update_not_price_only():
+    """Bug THẬT gặp trên tài khoản thật 2026-09-13: giá đổi VÀ stock/minQty
+    cũng đổi, nhưng code cũ ưu tiên gọi endpoint 'chỉ đổi giá' trước — endpoint
+    đó KHÔNG có khả năng đổi stock/minQty. Nó trả về 200 nên hàm dừng lại,
+    tưởng đã xong, nhưng stock/minQty CHƯA HỀ được gửi lên Eldorado thật (đã
+    xác nhận bằng cách fetch lại offer thật: giá đổi đúng, stock/minQty vẫn
+    y hệt giá trị cũ). only_price_changed=False phải bắt buộc dùng endpoint
+    update đầy đủ, không được đụng vào endpoint đổi-giá-riêng."""
+    client = AsyncMock()
+    client.put.return_value = FakeResponse(200)
+
+    success, message, link = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 700,
+        price_changed=True, only_price_changed=False, allow_create_new=True, create_new_enabled=True,
+    )
+
+    assert success is True
+    assert client.put.call_count == 1
+    called_url = client.put.call_args_list[0].args[0]
+    assert called_url == "https://api/update"  # KHÔNG được là urls.change
+
+
+@pytest.mark.asyncio
+async def test_only_stock_changed_no_price_change_uses_full_update():
+    client = AsyncMock()
+    client.put.return_value = FakeResponse(200)
+
+    success, message, link = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.0016"), 999999, 1500,
+        price_changed=False, only_price_changed=False, allow_create_new=True, create_new_enabled=True,
+    )
+
+    assert success is True
+    called_url = client.put.call_args_list[0].args[0]
+    assert called_url == "https://api/update"
+
+
+@pytest.mark.asyncio
 async def test_non_429_failure_does_not_trigger_recreate():
     client = AsyncMock()
     client.put.side_effect = [FakeResponse(400, text="Bad Request"), FakeResponse(400)]
 
     success, message, link = await apply_update(
         client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
-        price_changed=True, allow_create_new=True, create_new_enabled=True,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
     )
 
     assert success is False

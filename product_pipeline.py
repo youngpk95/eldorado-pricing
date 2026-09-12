@@ -192,6 +192,7 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
             new_min_qty = pricing.find_min_quantity(cfg.min_purchase_base, new_price, cfg.min_purchase_coef)
 
         update_price = new_price != offer.price
+        update_min_qty = new_min_qty != offer.min_quantity
 
         note_lines.append(
             f"Giá: {offer.price} -> {new_price} | Stock: {offer.quantity} -> {new_stock} | "
@@ -205,7 +206,7 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
             preview = ", ".join(f"{m.seller}={m.price}" for m in below_floor[:5])
             note_lines.append(f"⚠️ {len(below_floor)} đối thủ giá THẤP HƠN giá sàn (bị loại khi tính giá): {preview}")
 
-        if not (update_price or update_stock or new_min_qty != offer.min_quantity):
+        if not (update_price or update_stock or update_min_qty):
             note_lines.insert(0, "💤 Không có thay đổi.")
             await _write_result(sheets, row.index, "\n".join(note_lines), None)
             return
@@ -215,9 +216,11 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
             await _write_result(sheets, row.index, "\n".join(note_lines), None)
             return
 
+        only_price_changed = update_price and not update_stock and not update_min_qty
         success, message, link = await writer.apply_update(
             client, offer, urls, new_price, new_stock, new_min_qty,
-            price_changed=update_price, allow_create_new=True, create_new_enabled=cfg.create_new_enabled,
+            price_changed=update_price, only_price_changed=only_price_changed,
+            allow_create_new=True, create_new_enabled=cfg.create_new_enabled,
         )
         note_lines.insert(0, ("✅ " if success else "❌ ") + message)
         await _write_result(sheets, row.index, "\n".join(note_lines), link)
