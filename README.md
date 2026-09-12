@@ -107,6 +107,27 @@ eldorado_repricer_project.md để biết đúng commit/thời điểm).
 - Có `timeout` rõ ràng cho mọi request, và có unit test (`tests/`) — bản gốc
   không có test nào.
 
+## Xử lý lỗi 429 (quá tải — "Whoa! Calm down, cowboy!")
+
+Khi endpoint đổi giá/update của Eldorado trả về 429, tool tự **xoá offer cũ
++ tạo offer mới với GIÁ MỚI luôn** (chỉ áp dụng nếu bật `Allow Recreate on
+Rate Limit`) — copy nguyên Description/thời gian giao/thuộc tính của offer
+cũ. Theo xác nhận trực tiếp: **tạo offer mới không bao giờ bị 429** (chỉ 2
+endpoint đổi giá/update mới bị) nên chỉ cần đúng 1 lần tạo là xong, KHÔNG có
+retry loop nhiều lần trong `writer.py`.
+
+**Quan trọng:** vì offer mới có ID khác hẳn offer cũ, cột `My Listing URL`
+trên sheet sẽ được **tự động ghi đè sang link mới** ngay khi tạo lại thành
+công (`sheets_client.write_result`) — nếu không làm vậy, chu kỳ chạy TIẾP
+THEO sẽ vẫn cố đọc offer CŨ (đã bị xoá) và báo lỗi "Không tìm thấy ID sản
+phẩm" thay vì tiếp tục theo dõi đúng offer. Nếu 1 chu kỳ sau đó LẠI gặp 429,
+tool sẽ lặp lại đúng quy trình này (xoá + tạo lại lần nữa) — không giới hạn
+số lần lặp lại giữa CÁC CHU KỲ khác nhau, chỉ không lặp lại NHIỀU LẦN trong
+CÙNG 1 lần gọi `apply_update`.
+
+Xem `tests/test_writer.py` cho bộ test giả lập đầy đủ luồng này (không thể
+test an toàn bằng cách cố tình làm tài khoản thật bị 429).
+
 ## Lưu ý QUAN TRỌNG về để trống Price Min (đã xác nhận qua 2 lần review độc lập)
 
 Để trống `Price Min` ở 1 sản phẩm gây ra **2 hệ quả**, không chỉ 1:

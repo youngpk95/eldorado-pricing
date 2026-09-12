@@ -138,13 +138,21 @@ class SheetsClient:
     def write_result(self, row_index: int, note: str, link: str | None) -> None:
         """Ghi 3 cột kết quả (Trạng thái/Cập nhật lúc/Link mới, cột C/D/E)
         đúng dòng — giữ hành vi ghi NGAY sau mỗi sản phẩm như bản gốc (để
-        thấy tiến độ live), không gom hết tới cuối chu kỳ mới ghi 1 lần."""
+        thấy tiến độ live), không gom hết tới cuối chu kỳ mới ghi 1 lần.
+
+        Khi `link` có giá trị (chỉ xảy ra khi vừa xoá + tạo lại offer do gặp
+        429 — xem product_pipeline.py), NGHĨA LÀ offer cũ đã bị xoá thật,
+        nên cũng ghi đè luôn cột F (`My Listing URL`) sang link mới — nếu
+        không, chu kỳ chạy SAU sẽ tiếp tục đọc link CŨ (đã bị xoá) và báo lỗi
+        "Không tìm thấy ID sản phẩm" thay vì tiếp tục theo dõi đúng offer."""
         sheet_row = row_index + 2  # +1 header, +1 chuyển 0-based -> 1-based
         data = [
             {"range": f"{config.CONFIG_RANGE}!C{sheet_row}", "values": [[note]]},
             {"range": f"{config.CONFIG_RANGE}!D{sheet_row}", "values": [[datetime.now().strftime("%d/%m/%Y %H:%M:%S")]]},
             {"range": f"{config.CONFIG_RANGE}!E{sheet_row}", "values": [[link or ""]]},
         ]
+        if link:
+            data.append({"range": f"{config.CONFIG_RANGE}!F{sheet_row}", "values": [[link]]})
         try:
             self._service.values().batchUpdate(
                 spreadsheetId=config.SHEET_CONFIG_ID,

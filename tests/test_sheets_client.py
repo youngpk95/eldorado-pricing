@@ -55,3 +55,37 @@ def test_read_config_rows_empty_sheet_returns_empty_list(monkeypatch):
 
     client = _make_client_with_values([["Bật", "Tên SP"]])  # chỉ có header
     assert client.read_config_rows() == []
+
+
+def test_write_result_updates_own_listing_url_when_link_given(monkeypatch):
+    """Sau khi xoá + tạo lại offer (429), offer CŨ đã mất — nếu không cập
+    nhật luôn cột F (My Listing URL) sang link mới, chu kỳ chạy sau sẽ tìm
+    nhầm offer đã bị xoá. Xem product_pipeline.py/writer.py mục 429."""
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+
+    client = SheetsClient.__new__(SheetsClient)
+    fake_service = MagicMock()
+    client._service = fake_service
+
+    client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id")
+
+    body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
+    ranges_written = {d["range"]: d["values"][0][0] for d in body["data"]}
+    assert ranges_written["Sheet1!F2"] == "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id"
+    assert ranges_written["Sheet1!E2"] == "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id"
+
+
+def test_write_result_does_not_touch_own_listing_url_when_no_link(monkeypatch):
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+
+    client = SheetsClient.__new__(SheetsClient)
+    fake_service = MagicMock()
+    client._service = fake_service
+
+    client.write_result(0, "Không có thay đổi", None)
+
+    body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
+    ranges_written = {d["range"] for d in body["data"]}
+    assert "Sheet1!F2" not in ranges_written

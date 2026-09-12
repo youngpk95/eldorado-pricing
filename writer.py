@@ -6,8 +6,18 @@ lặp trong checkupdate.py (thử URL_UPDATE trước rồi mới URL_CHANGE, HO
 ngược lại, tuỳ field nào đổi) — gộp thành 1 hàm duy nhất `apply_update()`:
 nếu giá đổi thì thử endpoint đổi giá (nhẹ, nhanh) trước, fallback sang
 endpoint update đầy đủ; nếu giá KHÔNG đổi (chỉ stock/thời gian/minQty) thì chỉ
-cần endpoint update đầy đủ. Cả 2 trường hợp đều fallback sang xoá+tạo mới khi
-gặp 429, giữ đúng hành vi né rate-limit của bản gốc."""
+cần endpoint update đầy đủ.
+
+Khi gặp 429 (quá tải), fallback sang xoá + tạo lại offer VỚI GIÁ MỚI luôn
+(không phải tạo lại giá cũ rồi đổi giá sau). Theo xác nhận trực tiếp từ user
+(2026-09-13): tạo offer MỚI không bao giờ bị 429 (chỉ endpoint đổi
+giá/update mới bị) — nên chỉ cần đúng 1 lần tạo là xong, KHÔNG cần retry
+loop. Nếu chu kỳ SAU vẫn gặp 429 khi đổi giá (vì offer vừa tạo lại cũng cũ
+đi theo thời gian), `product_pipeline.py` sẽ tự lặp lại đúng luồng này —
+xoá + tạo lại lần nữa với giá mới nhất tại thời điểm đó. Vì offer mới có ID
+khác hẳn, sheet phải tự cập nhật lại `My Listing URL` (cột F) sang link mới
+— xem `product_pipeline.py`, nếu không chu kỳ sau sẽ tìm nhầm offer đã bị
+xoá."""
 from __future__ import annotations
 
 import copy
@@ -101,14 +111,16 @@ async def apply_update(
 
     is_429 = any(r.status_code == 429 for r in responses)
     status_summary = ", ".join(f"{r.status_code}" for r in responses)
-    if is_429 and allow_create_new and create_new_enabled:
-        new_link = await create_new_offer(client, offer, new_price, new_qty, new_min_qty)
-        if new_link:
-            return True, "Tạo offer mới thành công (429 rate-limit)", new_link
-        return False, f"429 rate-limit, tạo offer mới cũng thất bại (status: {status_summary})", None
+    if not (is_429 and allow_create_new and create_new_enabled):
+        body_texts = "; ".join(r.text[:200] for r in responses)
+        return False, f"Cập nhật thất bại (status: {status_summary}) — {body_texts}", None
 
-    body_texts = "; ".join(r.text[:200] for r in responses)
-    return False, f"Cập nhật thất bại (status: {status_summary}) — {body_texts}", None
+    # 429 -> xoá + tạo lại VỚI GIÁ MỚI. Tạo offer mới không bị 429 (xác nhận
+    # từ user) nên chỉ cần đúng 1 lần thử — không cần retry loop.
+    new_link, create_status = await create_new_offer(client, offer, new_price, new_qty, new_min_qty)
+    if new_link:
+        return True, "429 rate-limit -> xoá + tạo offer mới thành công", new_link
+    return False, f"429 rate-limit -> tạo offer mới cũng thất bại (status {create_status})", None
 
 
 def _delete_url_for_category(otype: str, offer_id: str) -> str:
@@ -127,10 +139,12 @@ async def create_new_offer(
     new_price: Decimal,
     new_qty: int,
     new_min_qty: int,
-) -> str | None:
-    """Xoá offer cũ + tạo offer mới hoàn toàn — Eldorado's 429 rate-limit
-    workaround, port từ RequestEldo.create_new. Thứ tự xoá trước/sau tuỳ
-    category, giữ đúng như bản gốc."""
+) -> tuple[str | None, int | None]:
+    """Xoá offer cũ + tạo offer mới hoàn toàn VỚI GIÁ MỚI luôn — Eldorado's
+    429 rate-limit workaround, port từ RequestEldo.create_new. Thứ tự xoá
+    trước/sau tuỳ category, giữ đúng như bản gốc. Trả về (link offer mới
+    hoặc None, status code của chính request tạo — None nếu lỗi xảy ra
+    trước khi kịp gọi request)."""
     otype = offer.offer_type or offer.category
     url_del = _delete_url_for_category(otype, offer.offer_id)
     should_delete_before = otype in ("Currency", "TopUp", "GiftCard")
@@ -192,12 +206,12 @@ async def create_new_offer(
         payload = {"details": details, "gameId": game_id, "category": "CustomItem", "tradeEnvironmentId": trade_env_id}
     else:
         logger.error("[create_new] Category không hỗ trợ tạo mới: %s", otype)
-        return None
+        return None, None
 
     resp = await client.post(url, payload)
     if resp.status_code not in (200, 201):
         logger.error("[create_new] Tạo offer mới thất bại: %s %s", resp.status_code, resp.text[:200])
-        return None
+        return None, resp.status_code
 
     resp_json = resp.json()
     offer_obj = resp_json.get("offer")
@@ -212,4 +226,4 @@ async def create_new_offer(
         except Exception as e:
             logger.error("[create_new] Lỗi xoá offer cũ sau: %s", e)
 
-    return new_url
+    return new_url, resp.status_code
