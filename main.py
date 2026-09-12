@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import logging.handlers
 import sys
+from pathlib import Path
 
 # Ép UTF-8 cho stdout/stderr — console Windows mặc định (code page cp1252)
 # có thể crash (UnicodeEncodeError) hoặc in lỗi khi log chứa tiếng Việt có
@@ -23,9 +25,21 @@ from models import ProductRow
 from product_pipeline import RowConfig, process_product
 from sheets_client import SheetsClient
 
+# Ghi log ra CẢ file lẫn console — đóng terminal/tắt máy không còn làm mất
+# lịch sử log, mai quay lại vẫn xem được lỗi/bug đã xảy ra qua đêm. Xoay
+# vòng file khi quá 5MB, giữ tối đa 5 file cũ (đủ nhiều ngày chạy 24/7, tự
+# dọn để không phình ổ đĩa vô hạn).
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.handlers.RotatingFileHandler(
+            LOG_DIR / "eldorado_repricer.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        ),
+    ],
 )
 logger = logging.getLogger(__name__)
 

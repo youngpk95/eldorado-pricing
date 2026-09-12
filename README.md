@@ -37,6 +37,20 @@ Mặc định `DRY_RUN=true` — chỉ tính toán + ghi log/note lên sheet, **
 giá thật lên Eldorado**. Xem vài chu kỳ chạy, thấy giá tính ra hợp lý rồi mới
 đổi `DRY_RUN=false` trong `.env`.
 
+## Xem lại log sau khi chạy không giám sát (qua đêm, tắt máy...)
+
+Mỗi lần chạy, tool ghi log ra **CẢ console lẫn file** `logs/eldorado_repricer.log`
+(tự xoay vòng khi quá 5MB, giữ tối đa 5 file cũ) — đóng terminal hay tắt máy
+không làm mất lịch sử, quay lại lúc nào cũng xem được. Cách xem nhanh riêng
+phần LỖI (không cần đọc hết cả file dài):
+
+```
+python scripts/show_errors.py
+```
+
+File log nằm trong `.gitignore` (không commit lên git) vì đây là dữ liệu vận
+hành, không phải code.
+
 ## Test
 
 ```
