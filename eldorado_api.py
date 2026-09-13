@@ -185,6 +185,12 @@ class EldoradoApiError(RuntimeError):
     pass
 
 
+class OfferNotFoundError(EldoradoApiError):
+    """Offer không còn tồn tại (400/404) — tách riêng khỏi EldoradoApiError
+    chung chung để product_pipeline.py xử lý khác đi: thử TỰ TẠO LẠI từ
+    snapshot đã lưu (xem offer_cache.py) thay vì chỉ báo lỗi bắt sửa tay."""
+
+
 class EldoradoClient:
     def __init__(self, get_cookie) -> None:
         self._get_cookie = get_cookie  # async callable () -> str
@@ -205,7 +211,7 @@ class EldoradoClient:
         headers = await self._headers()
         resp = await self._http.get(urls.detail, headers=headers)
         if resp.status_code in (400, 404):
-            raise EldoradoApiError("Không tìm thấy ID sản phẩm")
+            raise OfferNotFoundError("Không tìm thấy ID sản phẩm")
         if resp.status_code != 200:
             raise EldoradoApiError(f"Lỗi lấy chi tiết sản phẩm (status {resp.status_code})")
 

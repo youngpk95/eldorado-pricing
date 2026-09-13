@@ -169,6 +169,45 @@ async def create_new_offer(
         except Exception as e:
             logger.error("[create_new] Lỗi xoá offer cũ trước: %s", e)
 
+    new_url, status = await _post_new_offer(client, offer, new_price, new_qty, new_min_qty)
+
+    if new_url and not should_delete_before:
+        try:
+            resp_del = await client.delete(url_del)
+            if resp_del.status_code not in (200, 204):
+                logger.warning("[create_new] Xoá offer cũ SAU khi tạo mới thất bại: %s", resp_del.status_code)
+        except Exception as e:
+            logger.error("[create_new] Lỗi xoá offer cũ sau: %s", e)
+
+    return new_url, status
+
+
+async def recreate_offer_from_snapshot(
+    client: EldoradoClient,
+    offer: OwnOffer,
+    new_price: Decimal,
+    new_qty: int,
+    new_min_qty: int,
+) -> tuple[str | None, int | None]:
+    """Tạo offer mới TỪ SNAPSHOT đã lưu (offer_cache.py) — dùng khi phát
+    hiện offer gốc đã 404 ở 1 CHU KỲ SAU (không phải do chính lần chạy này
+    xoá — xem product_pipeline.py._recover_missing_offer). KHÁC
+    `create_new_offer` ở trên: KHÔNG gọi delete, vì offer gốc đã mất từ
+    trước, không còn gì để xoá thêm."""
+    return await _post_new_offer(client, offer, new_price, new_qty, new_min_qty)
+
+
+async def _post_new_offer(
+    client: EldoradoClient,
+    offer: OwnOffer,
+    new_price: Decimal,
+    new_qty: int,
+    new_min_qty: int,
+) -> tuple[str | None, int | None]:
+    """Build payload + gọi POST tạo offer mới — phần dùng chung giữa
+    `create_new_offer` (429, có xoá offer cũ kèm theo) và
+    `recreate_offer_from_snapshot` (404, không xoá gì cả)."""
+    otype = offer.offer_type or offer.category
     if new_price * new_min_qty < 1:
         new_min_qty = round(1 / new_price) if new_price > 0 else 1
     if otype in ("Account", "CustomItem"):
@@ -229,13 +268,5 @@ async def create_new_offer(
     offer_obj = resp_json.get("offer")
     new_id = offer_obj.get("id") if isinstance(offer_obj, dict) else resp_json.get("id")
     new_url = f"https://www.eldorado.gg/dashboard/offers/{offer.category}/edit/{new_id}"
-
-    if not should_delete_before:
-        try:
-            resp_del = await client.delete(url_del)
-            if resp_del.status_code not in (200, 204):
-                logger.warning("[create_new] Xoá offer cũ SAU khi tạo mới thất bại: %s", resp_del.status_code)
-        except Exception as e:
-            logger.error("[create_new] Lỗi xoá offer cũ sau: %s", e)
 
     return new_url, resp.status_code
