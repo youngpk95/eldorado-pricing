@@ -93,3 +93,45 @@ def test_write_result_does_not_touch_own_listing_url_when_no_link(monkeypatch):
     body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
     ranges_written = {d["range"] for d in body["data"]}
     assert "Sheet1!F2" not in ranges_written
+
+
+def test_write_result_retries_then_succeeds(monkeypatch):
+    """Lần ghi đầu 2 lần lỗi (vd tranh chấp kết nối/timeout), lần 3 thành
+    công — không được bỏ cuộc ngay từ lần lỗi đầu tiên."""
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+    monkeypatch.setattr(SheetsClient, "WRITE_RESULT_RETRY_DELAY_SECONDS", 0)
+
+    client = SheetsClient.__new__(SheetsClient)
+    fake_service = MagicMock()
+    fake_service.values.return_value.batchUpdate.return_value.execute.side_effect = [
+        Exception("boom 1"),
+        Exception("boom 2"),
+        None,
+    ]
+    client._service = fake_service
+    client._lock = threading.Lock()
+
+    client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id")
+
+    assert fake_service.values.return_value.batchUpdate.return_value.execute.call_count == 3
+
+
+def test_write_result_logs_link_when_all_retries_fail(monkeypatch, caplog):
+    """Nếu ghi thất bại HẾT các lần thử mà có link (vừa tạo lại offer do
+    429) — phải log RÕ link đó ra để còn dán tay, không được mất trắng."""
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+    monkeypatch.setattr(SheetsClient, "WRITE_RESULT_RETRY_DELAY_SECONDS", 0)
+
+    client = SheetsClient.__new__(SheetsClient)
+    fake_service = MagicMock()
+    fake_service.values.return_value.batchUpdate.return_value.execute.side_effect = Exception("mất kết nối")
+    client._service = fake_service
+    client._lock = threading.Lock()
+
+    with caplog.at_level("ERROR"):
+        client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id")
+
+    assert fake_service.values.return_value.batchUpdate.return_value.execute.call_count == SheetsClient.WRITE_RESULT_MAX_ATTEMPTS
+    assert any("https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id" in r.message for r in caplog.records)

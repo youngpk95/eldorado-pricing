@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime
 
 from google.oauth2 import service_account
@@ -174,6 +175,9 @@ class SheetsClient:
         with self._lock:
             self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body={"requests": requests}).execute()
 
+    WRITE_RESULT_MAX_ATTEMPTS = 3
+    WRITE_RESULT_RETRY_DELAY_SECONDS = 2
+
     def write_result(self, row_index: int, note: str, link: str | None) -> None:
         """Ghi 3 cột kết quả (Trạng thái/Cập nhật lúc/Link mới, cột C/D/E)
         đúng dòng — giữ hành vi ghi NGAY sau mỗi sản phẩm như bản gốc (để
@@ -183,7 +187,14 @@ class SheetsClient:
         429 — xem product_pipeline.py), NGHĨA LÀ offer cũ đã bị xoá thật,
         nên cũng ghi đè luôn cột F (`My Listing URL`) sang link mới — nếu
         không, chu kỳ chạy SAU sẽ tiếp tục đọc link CŨ (đã bị xoá) và báo lỗi
-        "Không tìm thấy ID sản phẩm" thay vì tiếp tục theo dõi đúng offer."""
+        "Không tìm thấy ID sản phẩm" thay vì tiếp tục theo dõi đúng offer.
+
+        Bug thật đã gặp (2026-09-13): ghi thất bại ngay sau khi tạo lại offer
+        mới khiến dòng đó KẸT VĨNH VIỄN (offer cũ đã xoá thật, sheet vẫn trỏ
+        về ID cũ, tool không có cách nào tự phát hiện lại offer mới) — phải
+        sửa tay. Nên giờ retry vài lần trước khi bỏ cuộc; nếu vẫn thất bại và
+        có `link` (trường hợp tốn kém nhất), log RÕ link đó ra để còn dán tay
+        được, thay vì mất luôn không dấu vết."""
         sheet_row = row_index + 2  # +1 header, +1 chuyển 0-based -> 1-based
         data = [
             {"range": f"{config.CONFIG_RANGE}!C{sheet_row}", "values": [[note]]},
@@ -192,11 +203,32 @@ class SheetsClient:
         ]
         if link:
             data.append({"range": f"{config.CONFIG_RANGE}!F{sheet_row}", "values": [[link]]})
-        try:
-            with self._lock:
-                self._service.values().batchUpdate(
-                    spreadsheetId=config.SHEET_CONFIG_ID,
-                    body={"valueInputOption": "USER_ENTERED", "data": data},
-                ).execute()
-        except Exception as e:
-            logger.error("[sheets] Lỗi ghi kết quả dòng %s: %s", sheet_row, e)
+
+        last_error: Exception | None = None
+        for attempt in range(1, self.WRITE_RESULT_MAX_ATTEMPTS + 1):
+            try:
+                with self._lock:
+                    self._service.values().batchUpdate(
+                        spreadsheetId=config.SHEET_CONFIG_ID,
+                        body={"valueInputOption": "USER_ENTERED", "data": data},
+                    ).execute()
+                return
+            except Exception as e:
+                last_error = e
+                if attempt < self.WRITE_RESULT_MAX_ATTEMPTS:
+                    logger.warning(
+                        "[sheets] Ghi kết quả dòng %s lỗi (lần %d/%d), thử lại: %s",
+                        sheet_row, attempt, self.WRITE_RESULT_MAX_ATTEMPTS, e,
+                    )
+                    time.sleep(self.WRITE_RESULT_RETRY_DELAY_SECONDS)
+
+        logger.error(
+            "[sheets] Lỗi ghi kết quả dòng %s (đã thử %d lần): %s",
+            sheet_row, self.WRITE_RESULT_MAX_ATTEMPTS, last_error,
+        )
+        if link:
+            logger.error(
+                "[sheets] QUAN TRỌNG: dòng %s vừa tạo lại offer mới nhưng KHÔNG ghi được link vào sheet "
+                "— offer CŨ đã bị xoá thật, phải tự dán link này vào cột 'My Listing URL' (cột F): %s",
+                sheet_row, link,
+            )
