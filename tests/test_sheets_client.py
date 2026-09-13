@@ -4,6 +4,7 @@ THẬT đã gặp ở tool G2G Repricer sibling (checkbox khiến mọi dòng tr
 áp dụng tự có giá trị "FALSE", kéo dài "vùng dữ liệu đã dùng" ra hàng trăm
 dòng trống) — test này đảm bảo tool Eldorado không dính lại bug tương tự."""
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -19,6 +20,7 @@ def _make_client_with_values(values: list[list[str]]) -> SheetsClient:
     fake_service = MagicMock()
     fake_service.values.return_value.get.return_value.execute.return_value = {"values": values}
     client._service = fake_service
+    client._lock = threading.Lock()
     return client
 
 
@@ -67,6 +69,7 @@ def test_write_result_updates_own_listing_url_when_link_given(monkeypatch):
     client = SheetsClient.__new__(SheetsClient)
     fake_service = MagicMock()
     client._service = fake_service
+    client._lock = threading.Lock()
 
     client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id")
 
@@ -83,6 +86,7 @@ def test_write_result_does_not_touch_own_listing_url_when_no_link(monkeypatch):
     client = SheetsClient.__new__(SheetsClient)
     fake_service = MagicMock()
     client._service = fake_service
+    client._lock = threading.Lock()
 
     client.write_result(0, "Không có thay đổi", None)
 

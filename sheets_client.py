@@ -9,6 +9,7 @@ dòng 1 — nhờ vậy dòng 1 có thể dùng nhãn tiếng Việt ngắn gọ
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime
 
 from google.oauth2 import service_account
@@ -29,6 +30,12 @@ class SheetsClient:
         # cache_discovery=False: tránh warning/ghi file cache không cần thiết
         # khi chạy như 1 script ngắn hạn (giống cách bản gốc tắt discovery cache).
         self._service = build("sheets", "v4", credentials=creds, cache_discovery=False).spreadsheets()
+        # httplib2.Http (nền tảng của googleapiclient) KHÔNG thread-safe —
+        # read_config_rows/write_result chạy qua asyncio.to_thread và có thể
+        # bị gọi song song (nhiều sản phẩm xử lý cùng lúc), 2 thread dùng
+        # chung 1 kết nối TLS cùng lúc gây lỗi "SSL: DECRYPTION_FAILED_OR_
+        # BAD_RECORD_MAC" ngẫu nhiên. Khoá tuần tự hoá mọi lời gọi API.
+        self._lock = threading.Lock()
 
     def read_config_rows(self) -> list[dict[str, str]]:
         """Bỏ qua dòng 1 (chỉ là nhãn hiển thị) — map dữ liệu theo VỊ TRÍ cột
@@ -42,11 +49,12 @@ class SheetsClient:
         (xem g2g_repricing_tool_feature.md). Chỉ giữ dòng có NAME hoặc
         OWN_LISTING_URL — KHÔNG dùng "mọi cell đều trống" để lọc, vì lý do
         trên."""
-        data = (
-            self._service.values()
-            .get(spreadsheetId=config.SHEET_CONFIG_ID, range=config.CONFIG_RANGE)
-            .execute()
-        )
+        with self._lock:
+            data = (
+                self._service.values()
+                .get(spreadsheetId=config.SHEET_CONFIG_ID, range=config.CONFIG_RANGE)
+                .execute()
+            )
         values = data.get("values", [])
         if len(values) <= 1:
             return []
@@ -63,7 +71,8 @@ class SheetsClient:
         return rows
 
     def _get_sheet_id(self) -> int:
-        meta = self._service.get(spreadsheetId=config.SHEET_CONFIG_ID, fields="sheets.properties").execute()
+        with self._lock:
+            meta = self._service.get(spreadsheetId=config.SHEET_CONFIG_ID, fields="sheets.properties").execute()
         for sheet in meta.get("sheets", []):
             props = sheet.get("properties", {})
             if props.get("title") == config.CONFIG_RANGE:
@@ -73,7 +82,8 @@ class SheetsClient:
     def clear_range(self, a1_range: str) -> None:
         """Xoá sạch nội dung 1 vùng (giữ nguyên định dạng ô) — dùng khi cần
         dọn header/dữ liệu cũ trước khi thiết lập lại 1 tab config."""
-        self._service.values().clear(spreadsheetId=config.SHEET_CONFIG_ID, range=a1_range).execute()
+        with self._lock:
+            self._service.values().clear(spreadsheetId=config.SHEET_CONFIG_ID, range=a1_range).execute()
 
     def write_header_row_with_notes(self) -> None:
         """Ghi đè dòng 1 (header hiển thị) của tab config chính, kèm 1 note
@@ -106,7 +116,8 @@ class SheetsClient:
                 }
             ]
         }
-        self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body=request).execute()
+        with self._lock:
+            self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body=request).execute()
 
     def add_header_column(self, column_index: int, label: str, note: str) -> None:
         """Ghi nhãn+chú thích cho ĐÚNG 1 cột header mới (0-based) — KHÔNG xoá
@@ -132,7 +143,8 @@ class SheetsClient:
                 }
             ]
         }
-        self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body=request).execute()
+        with self._lock:
+            self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body=request).execute()
 
     def set_checkbox_columns(self, column_indices: list[int], num_rows: int = 1000) -> None:
         """Đặt Data Validation kiểu BOOLEAN (checkbox thật) cho các cột
@@ -159,7 +171,8 @@ class SheetsClient:
             }
             for col in column_indices
         ]
-        self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body={"requests": requests}).execute()
+        with self._lock:
+            self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body={"requests": requests}).execute()
 
     def write_result(self, row_index: int, note: str, link: str | None) -> None:
         """Ghi 3 cột kết quả (Trạng thái/Cập nhật lúc/Link mới, cột C/D/E)
@@ -180,9 +193,10 @@ class SheetsClient:
         if link:
             data.append({"range": f"{config.CONFIG_RANGE}!F{sheet_row}", "values": [[link]]})
         try:
-            self._service.values().batchUpdate(
-                spreadsheetId=config.SHEET_CONFIG_ID,
-                body={"valueInputOption": "USER_ENTERED", "data": data},
-            ).execute()
+            with self._lock:
+                self._service.values().batchUpdate(
+                    spreadsheetId=config.SHEET_CONFIG_ID,
+                    body={"valueInputOption": "USER_ENTERED", "data": data},
+                ).execute()
         except Exception as e:
             logger.error("[sheets] Lỗi ghi kết quả dòng %s: %s", sheet_row, e)
