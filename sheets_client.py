@@ -10,9 +10,18 @@ TIẾP qua Sheets API (không phải IMPORTRANGE, không bị lag) — chỉ áp
 cột 'Link Sheet'/'Name Sheet' + 'Cell Min' và/hoặc 'Cell Max', khác hẳn cơ
 chế tham chiếu chéo toàn diện đã bỏ.
 
-Đọc dữ liệu theo VỊ TRÍ CỘT (`sheet_schema.INTERNAL_KEYS`), KHÔNG theo chữ ở
-dòng 1 — nhờ vậy dòng 1 có thể dùng nhãn tiếng Việt ngắn gọn cho nhân viên dễ
-đọc mà không ảnh hưởng gì tới việc parse dữ liệu (xem sheet_schema.py)."""
+Đọc/ghi dữ liệu theo TÊN HEADER ở dòng 1 (khớp CHÍNH XÁC với label trong
+`sheet_schema.COLUMNS`), KHÔNG theo vị trí cột nữa. Đổi hẳn từ vị trí sang
+tên sau bug thật đã gặp (2026-09-14): nhân viên chèn 4 cột mới (Link
+Sheet/Name Sheet/Cell Min/Cell Max) vào GIỮA bảng thay vì cuối bảng, làm
+lệch vị trí MỌI cột phía sau — code đọc/ghi nhầm cột mà không hề báo lỗi rõ
+ràng (chỉ crash sâu bên trong logic tính giá với `ValueError` khó hiểu:
+"could not convert string to float: 'TRUE'", vì đọc nhầm giá trị checkbox
+Always Undercut vào chỗ Min Competitor Ratings). Đọc/ghi theo tên header thì
+chèn/xoá/đổi thứ tự cột bất kỳ đâu trên sheet đều KHÔNG làm hỏng gì (miễn
+KHÔNG đổi tên/xoá nhầm chính header đó) — đổi lại: đổi TÊN header ở dòng 1
+giờ mới là thứ không được làm tuỳ tiện (phải khớp `sheet_schema.COLUMNS`),
+ngược hẳn với thiết kế cũ (trước đây đổi tên thoải mái, đổi vị trí thì vỡ)."""
 from __future__ import annotations
 
 import logging
@@ -51,6 +60,16 @@ def extract_spreadsheet_id(url: str) -> str | None:
     return None
 
 
+def _column_letter(index: int) -> str:
+    """0-based column index -> ký hiệu cột kiểu A1 (0->A, 25->Z, 26->AA...)."""
+    letters = ""
+    n = index + 1
+    while n > 0:
+        n, remainder = divmod(n - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
 class SheetsClient:
     def __init__(self) -> None:
         creds_dict = config.load_google_service_account()
@@ -64,10 +83,56 @@ class SheetsClient:
         # chung 1 kết nối TLS cùng lúc gây lỗi "SSL: DECRYPTION_FAILED_OR_
         # BAD_RECORD_MAC" ngẫu nhiên. Khoá tuần tự hoá mọi lời gọi API.
         self._lock = threading.Lock()
+        # Map internal_key -> 0-based column index THẬT trên sheet, build từ
+        # header dòng 1 (xem _build_key_to_index) — cache lại trong
+        # read_config_rows() mỗi chu kỳ, write_result() dùng lại cache này để
+        # biết đúng cột thật cần ghi (không hardcode C/D/E/F nữa).
+        self._key_to_index: dict[str, int] | None = None
+
+    def _build_key_to_index(self, header_row: list[str]) -> dict[str, int]:
+        """Map internal_key -> 0-based column index bằng cách khớp TÊN header
+        thật ở dòng 1 với label trong sheet_schema.COLUMNS — bất kể cột đó
+        đang nằm ở vị trí nào trên sheet. Thiếu/đổi tên nhầm 1 header bắt
+        buộc thì báo lỗi rõ ràng NGAY ĐÂY, thay vì để code đọc nhầm dữ liệu
+        cột khác rồi crash khó hiểu ở tận sâu trong logic tính giá."""
+        label_to_index = {label.strip(): i for i, label in enumerate(header_row) if label.strip()}
+        key_to_index: dict[str, int] = {}
+        missing: list[str] = []
+        for key, label, _note in COLUMNS:
+            if label in label_to_index:
+                key_to_index[key] = label_to_index[label]
+            else:
+                missing.append(f"'{label}' ({key})")
+        if missing:
+            raise RuntimeError(
+                f"Dòng 1 của sheet cấu hình thiếu {len(missing)} cột bắt buộc (tên không khớp — có thể bị "
+                f"đổi tên hoặc xoá nhầm): {', '.join(missing)}. Tool đọc/ghi theo ĐÚNG TÊN header ở dòng 1 "
+                f"(không theo vị trí) — sửa lại tên cột cho khớp, xem sheet_schema.py."
+            )
+        return key_to_index
+
+    def _ensure_key_to_index(self) -> dict[str, int]:
+        """Trả cache đã build trong lần read_config_rows() gần nhất (trường
+        hợp bình thường: main.py luôn đọc 1 lần rồi mới ghi nhiều lần/chu
+        kỳ). Nếu chưa có cache (vd write_result được gọi độc lập, chưa từng
+        read — chỉ xảy ra khi dùng SheetsClient lẻ tẻ ngoài luồng chính),
+        fetch riêng đúng dòng 1 để build."""
+        if self._key_to_index is not None:
+            return self._key_to_index
+        with self._lock:
+            data = (
+                self._service.values()
+                .get(spreadsheetId=config.SHEET_CONFIG_ID, range=f"{config.CONFIG_RANGE}!1:1")
+                .execute()
+            )
+        header_row = data.get("values", [[]])[0] if data.get("values") else []
+        self._key_to_index = self._build_key_to_index(header_row)
+        return self._key_to_index
 
     def read_config_rows(self) -> list[dict[str, str]]:
-        """Bỏ qua dòng 1 (chỉ là nhãn hiển thị) — map dữ liệu theo VỊ TRÍ cột
-        khớp với sheet_schema.INTERNAL_KEYS, không theo chữ thật ở dòng 1.
+        """Đọc theo TÊN header dòng 1 (xem _build_key_to_index), không theo
+        vị trí — chèn/xoá/đổi thứ tự cột trên sheet không làm hỏng gì, miễn
+        không đổi tên/xoá nhầm chính các header đó.
 
         Lọc bỏ dòng "ma" (hoàn toàn trống nhưng vẫn được API trả về): dùng
         checkbox (Data Validation BOOLEAN) cho cột ENABLED khiến MỌI dòng
@@ -86,16 +151,19 @@ class SheetsClient:
         values = data.get("values", [])
         if len(values) <= 1:
             return []
+        key_to_index = self._build_key_to_index(values[0])
+        self._key_to_index = key_to_index  # cache cho write_result() dùng lại trong chu kỳ này
+
         data_rows = values[1:]
-        name_idx = INTERNAL_KEYS.index("NAME")
-        url_idx = INTERNAL_KEYS.index("OWN_LISTING_URL")
+        name_idx = key_to_index["NAME"]
+        url_idx = key_to_index["OWN_LISTING_URL"]
         rows = []
         for row in data_rows:
             has_name = name_idx < len(row) and row[name_idx]
             has_url = url_idx < len(row) and row[url_idx]
             if not has_name and not has_url:
                 continue
-            rows.append({INTERNAL_KEYS[i]: (row[i] if i < len(row) else "") for i in range(len(INTERNAL_KEYS))})
+            rows.append({key: (row[idx] if idx < len(row) else "") for key, idx in key_to_index.items()})
         return rows
 
     def _get_sheet_id(self) -> int:
@@ -256,14 +324,19 @@ class SheetsClient:
     WRITE_RESULT_RETRY_DELAY_SECONDS = 2
 
     def write_result(self, row_index: int, note: str, link: str | None) -> None:
-        """Ghi 3 cột kết quả (Trạng thái/Cập nhật lúc/Link mới, cột C/D/E)
-        đúng dòng — giữ hành vi ghi NGAY sau mỗi sản phẩm như bản gốc (để
-        thấy tiến độ live), không gom hết tới cuối chu kỳ mới ghi 1 lần.
+        """Ghi 3 cột kết quả (Status/Updated At/New Link) đúng dòng — giữ
+        hành vi ghi NGAY sau mỗi sản phẩm như bản gốc (để thấy tiến độ
+        live), không gom hết tới cuối chu kỳ mới ghi 1 lần.
+
+        Cột đích tra theo TÊN header (qua _ensure_key_to_index), KHÔNG còn
+        hardcode C/D/E/F — bug thật đã gặp (2026-09-14): nhân viên chèn cột
+        mới vào giữa bảng làm lệch vị trí, nếu vẫn hardcode chữ cột thì write
+        sẽ ghi ĐÈ NHẦM lên dữ liệu cột khác (còn nguy hiểm hơn cả đọc nhầm).
 
         Khi `link` có giá trị (chỉ xảy ra khi vừa xoá + tạo lại offer do gặp
         429 — xem product_pipeline.py), NGHĨA LÀ offer cũ đã bị xoá thật,
-        nên cũng ghi đè luôn cột F (`My Listing URL`) sang link mới — nếu
-        không, chu kỳ chạy SAU sẽ tiếp tục đọc link CŨ (đã bị xoá) và báo lỗi
+        nên cũng ghi đè luôn cột `My Listing URL` sang link mới — nếu không,
+        chu kỳ chạy SAU sẽ tiếp tục đọc link CŨ (đã bị xoá) và báo lỗi
         "Không tìm thấy ID sản phẩm" thay vì tiếp tục theo dõi đúng offer.
 
         Bug thật đã gặp (2026-09-13): ghi thất bại ngay sau khi tạo lại offer
@@ -273,13 +346,18 @@ class SheetsClient:
         có `link` (trường hợp tốn kém nhất), log RÕ link đó ra để còn dán tay
         được, thay vì mất luôn không dấu vết."""
         sheet_row = row_index + 2  # +1 header, +1 chuyển 0-based -> 1-based
+        key_to_index = self._ensure_key_to_index()
+        status_col = _column_letter(key_to_index["LAST_STATUS"])
+        updated_col = _column_letter(key_to_index["LAST_UPDATED_AT"])
+        newlink_col = _column_letter(key_to_index["NEW_OFFER_LINK"])
+        ownurl_col = _column_letter(key_to_index["OWN_LISTING_URL"])
         data = [
-            {"range": f"{config.CONFIG_RANGE}!C{sheet_row}", "values": [[note]]},
-            {"range": f"{config.CONFIG_RANGE}!D{sheet_row}", "values": [[datetime.now().strftime("%d/%m/%Y %H:%M:%S")]]},
-            {"range": f"{config.CONFIG_RANGE}!E{sheet_row}", "values": [[link or ""]]},
+            {"range": f"{config.CONFIG_RANGE}!{status_col}{sheet_row}", "values": [[note]]},
+            {"range": f"{config.CONFIG_RANGE}!{updated_col}{sheet_row}", "values": [[datetime.now().strftime("%d/%m/%Y %H:%M:%S")]]},
+            {"range": f"{config.CONFIG_RANGE}!{newlink_col}{sheet_row}", "values": [[link or ""]]},
         ]
         if link:
-            data.append({"range": f"{config.CONFIG_RANGE}!F{sheet_row}", "values": [[link]]})
+            data.append({"range": f"{config.CONFIG_RANGE}!{ownurl_col}{sheet_row}", "values": [[link]]})
 
         last_error: Exception | None = None
         for attempt in range(1, self.WRITE_RESULT_MAX_ATTEMPTS + 1):
@@ -306,6 +384,6 @@ class SheetsClient:
         if link:
             logger.error(
                 "[sheets] QUAN TRỌNG: dòng %s vừa tạo lại offer mới nhưng KHÔNG ghi được link vào sheet "
-                "— offer CŨ đã bị xoá thật, phải tự dán link này vào cột 'My Listing URL' (cột F): %s",
-                sheet_row, link,
+                "— offer CŨ đã bị xoá thật, phải tự dán link này vào cột 'My Listing URL' (cột %s): %s",
+                sheet_row, ownurl_col, link,
             )

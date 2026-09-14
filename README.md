@@ -132,11 +132,15 @@ nhân viên rê chuột vào ô header trên Google Sheets sẽ thấy giải th
 3. Đặt **checkbox thật** (Data Validation kiểu BOOLEAN) cho cột `Enabled`
    (dòng 2-1000) — nhân viên tích/bỏ tích thay vì gõ tay `1`.
 
-**Quan trọng:** code đọc dữ liệu theo VỊ TRÍ CỘT (thứ tự trong
-`sheet_schema.COLUMNS`), KHÔNG theo chữ hiển thị ở dòng 1 — nên bạn có thể tự
-sửa lại nhãn tiếng Việt cho dễ hiểu hơn nữa mà không sợ hỏng tool, miễn KHÔNG
-tự ý thêm/xoá/đổi thứ tự cột (muốn đổi thứ tự cột thật sự thì sửa
-`sheet_schema.py` rồi chạy lại script thiết lập).
+**Quan trọng (đổi từ 2026-09-14):** code đọc/ghi theo ĐÚNG TÊN header ở dòng
+1 (phải khớp CHÍNH XÁC label trong `sheet_schema.COLUMNS`, vd `Price Min`,
+`Stock`...), KHÔNG còn theo vị trí/thứ tự cột nữa — nên bạn có thể tự chèn,
+xoá, hoặc đổi thứ tự cột bất kỳ đâu trên sheet mà KHÔNG sợ hỏng tool. Ngược
+lại: **không được tự đổi tên header** ở dòng 1 (hoặc gõ sai chính tả khi tự
+thêm cột) — sai tên sẽ khiến tool báo lỗi rõ ràng ngay khi đọc sheet (thiếu
+cột bắt buộc), thay vì đọc nhầm dữ liệu cột khác một cách âm thầm như bug
+thật đã gặp trước đây (chèn 4 cột `Link Sheet`/`Name Sheet`/`Cell Min`/`Cell
+Max` vào giữa bảng làm lệch mọi cột phía sau).
 
 Xem đầy đủ 25 cột + giải thích trong `sheet_schema.py` (`COLUMNS`), hoặc mở
 sheet thật và rê chuột vào từng ô header. Tóm tắt nhanh: `Enabled` (checkbox
