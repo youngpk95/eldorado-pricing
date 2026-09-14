@@ -91,29 +91,63 @@ class RowConfig:
         return self.row.get("EXTERNAL_SHEET_CELL")
 
     @property
+    def external_sheet_cell_max(self) -> str:
+        return self.row.get("EXTERNAL_SHEET_CELL_MAX")
+
+    @property
     def has_external_price_min(self) -> bool:
-        """True khi dòng này CHỦ ĐỘNG điền đủ 3 cột Link Sheet/Name
-        Sheet/Cell Min — chỉ khi đó mới đọc Price Min từ sheet khác, để
-        trống 3 cột này thì hành vi y hệt như trước (đọc thẳng PRICE_MIN)."""
+        """True khi dòng này CHỦ ĐỘNG điền đủ Link Sheet/Name Sheet/Cell Min
+        — chỉ khi đó mới đọc Price Min từ sheet khác, để trống thì hành vi y
+        hệt như trước (đọc thẳng PRICE_MIN)."""
         return bool(self.external_sheet_link and self.external_sheet_name and self.external_sheet_cell)
 
     @property
-    def _external_price_min_resolved_decimal(self) -> Decimal | None:
-        """Giá trị external ĐÃ parse thành công thành Decimal, hoặc None nếu
-        chưa đọc được / đọc được nhưng không phải số (vd ô chứa '#REF!',
-        'N/A', hay 1 nhãn chữ do người dùng gõ nhầm ô). Dùng chung cho cả
-        price_min lẫn external_price_min_warning bên dưới — TRÁNH lặp lại
-        logic 2 nơi rồi lệch nhau (bug đã bị agent review phát hiện: warning
-        từng chỉ kiểm tra "có resolved hay không" mà không kiểm tra "resolved
-        có parse được thành số hay không", nên 1 ô chứa text không phải số
-        vẫn âm thầm fallback về Price Min tại chỗ mà KHÔNG có cảnh báo)."""
-        resolved = self.row.get("_EXTERNAL_PRICE_MIN_RESOLVED")
-        return _to_decimal(resolved) if resolved else None
+    def has_external_price_max(self) -> bool:
+        """Tương tự has_external_price_min, nhưng cho Price Max — dùng chung
+        Link Sheet/Name Sheet với Price Min, chỉ khác cột Cell Max riêng (1
+        dòng có thể bật external cho Min, Max, cả hai, hoặc không cái nào)."""
+        return bool(self.external_sheet_link and self.external_sheet_name and self.external_sheet_cell_max)
+
+    def _resolve_external_or_local(
+        self, has_external: bool, resolved_key: str, local_key: str, label: str, cell_label: str, no_value_phrase: str
+    ) -> tuple[Decimal | None, str | None]:
+        """Logic DÙNG CHUNG cho cả price_min lẫn price_max (khác nhau đúng 1
+        cột Cell Min/Cell Max, còn lại giống hệt) — tránh viết lặp 2 nơi rồi
+        dễ lệch nhau như bug đã bị agent review phát hiện (warning từng chỉ
+        kiểm tra "có resolved hay không" mà không kiểm tra "resolved có parse
+        được thành số hay không", nên 1 ô chứa text không phải số vẫn âm thầm
+        fallback mà KHÔNG có cảnh báo).
+
+        Trả về (giá trị nên dùng, cảnh báo nếu có) — None ở vế 2 nghĩa là
+        không có gì bất thường để báo."""
+        if not has_external:
+            return _to_decimal(self.row.get(local_key)), None
+
+        resolved = self.row.get(resolved_key)
+        external_value = _to_decimal(resolved) if resolved else None
+        if external_value is not None:
+            return external_value, None
+
+        fallback_raw = self.row.get(local_key)
+        fallback_value = _to_decimal(fallback_raw)
+        if fallback_value is not None:
+            warning = (
+                f"⚠️ Không đọc được {label} từ sheet ngoài (Link Sheet/Name Sheet/{cell_label}) — "
+                f"kiểm tra đã share quyền Viewer cho service account, đúng tên tab và đúng ô chưa. "
+                f"Đang dùng tạm {label} tại chỗ ({fallback_raw}) làm dự phòng."
+            )
+        else:
+            trong_hoac_khong_phai_so = "cũng đang trống" if not fallback_raw else f"cũng không phải số hợp lệ ({fallback_raw})"
+            warning = (
+                f"⚠️ Không đọc được {label} từ sheet ngoài, và cột {label} tại chỗ {trong_hoac_khong_phai_so} — "
+                f"dòng này sẽ chạy như KHÔNG có {no_value_phrase} cho tới khi sửa."
+            )
+        return fallback_value, warning
 
     @property
     def price_min(self) -> Decimal | None:
         """Nếu đã điền đủ Link Sheet/Name Sheet/Cell Min, ưu tiên giá trị đọc
-        TRỰC TIẾP từ sheet ngoài qua Sheets API — main._resolve_external_price_mins
+        TRỰC TIẾP từ sheet ngoài qua Sheets API — main._resolve_external_cells
         gom đọc 1 lần/chu kỳ rồi gắn tạm vào row["_EXTERNAL_PRICE_MIN_RESOLVED"]
         trước khi RowConfig được tạo (không lag như công thức IMPORTRANGE).
 
@@ -121,36 +155,41 @@ class RowConfig:
         sai ô...) thì fallback về cột PRICE_MIN tại chỗ (nếu có số) để dòng
         không bị treo hoàn toàn — xem external_price_min_warning để lấy cảnh
         báo ghi vào Status cho staff biết mà sửa."""
-        if self.has_external_price_min:
-            external_value = self._external_price_min_resolved_decimal
-            if external_value is not None:
-                return external_value
-            return _to_decimal(self.row.get("PRICE_MIN"))
-        return _to_decimal(self.row.get("PRICE_MIN"))
+        value, _ = self._resolve_external_or_local(
+            self.has_external_price_min, "_EXTERNAL_PRICE_MIN_RESOLVED", "PRICE_MIN",
+            "Price Min", "Cell Min", "giá sàn",
+        )
+        return value
 
     @property
     def external_price_min_warning(self) -> str | None:
-        """Cảnh báo (nếu có) khi đã điền 3 cột external nhưng KHÔNG đọc được
-        giá trị HỢP LỆ (rỗng, lỗi, hoặc đọc được nhưng không phải số) — dùng
-        để ghi rõ vào Status, tránh staff tưởng nhầm tool đang bám đúng Price
-        Min từ sheet ngoài trong khi thực ra đang fallback."""
-        if not self.has_external_price_min or self._external_price_min_resolved_decimal is not None:
-            return None
-        fallback = self.row.get("PRICE_MIN")
-        if fallback:
-            return (
-                f"⚠️ Không đọc được Price Min từ sheet ngoài (Link Sheet/Name Sheet/Cell Min) — "
-                f"kiểm tra đã share quyền Viewer cho service account, đúng tên tab và đúng ô chưa. "
-                f"Đang dùng tạm Price Min tại chỗ ({fallback}) làm dự phòng."
-            )
-        return (
-            "⚠️ Không đọc được Price Min từ sheet ngoài, và cột Price Min tại chỗ cũng đang trống "
-            "— dòng này sẽ chạy như KHÔNG có giá sàn cho tới khi sửa."
+        """Cảnh báo (nếu có) khi đã điền cột external cho Price Min nhưng
+        KHÔNG đọc được giá trị HỢP LỆ — ghi rõ vào Status, tránh staff tưởng
+        nhầm tool đang bám đúng Price Min từ sheet ngoài trong khi thực ra
+        đang fallback."""
+        _, warning = self._resolve_external_or_local(
+            self.has_external_price_min, "_EXTERNAL_PRICE_MIN_RESOLVED", "PRICE_MIN",
+            "Price Min", "Cell Min", "giá sàn",
         )
+        return warning
 
     @property
     def price_max(self) -> Decimal | None:
-        return _to_decimal(self.row.get("PRICE_MAX"))
+        """Y hệt price_min, nhưng cho Price Max qua cột Cell Max — xem
+        docstring price_min ở trên."""
+        value, _ = self._resolve_external_or_local(
+            self.has_external_price_max, "_EXTERNAL_PRICE_MAX_RESOLVED", "PRICE_MAX",
+            "Price Max", "Cell Max", "giá trần",
+        )
+        return value
+
+    @property
+    def external_price_max_warning(self) -> str | None:
+        _, warning = self._resolve_external_or_local(
+            self.has_external_price_max, "_EXTERNAL_PRICE_MAX_RESOLVED", "PRICE_MAX",
+            "Price Max", "Cell Max", "giá trần",
+        )
+        return warning
 
     @property
     def discount_amount(self) -> Decimal:
@@ -273,6 +312,8 @@ async def _compute_target(
         note_lines.append(f"⚠️ {len(below_floor)} đối thủ giá THẤP HƠN giá sàn (bị loại khi tính giá): {preview}")
     if cfg.external_price_min_warning:
         note_lines.append(cfg.external_price_min_warning)
+    if cfg.external_price_max_warning:
+        note_lines.append(cfg.external_price_max_warning)
 
     return new_price, new_stock, new_min_qty, note_lines
 

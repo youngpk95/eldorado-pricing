@@ -53,6 +53,64 @@ def test_ignores_relax_from_rows_missing_required_links(monkeypatch):
     assert _compute_loop_delay([broken]) == 30
 
 
+class _FakeSheetsExternalCells:
+    """Sheets giả cho test _resolve_external_cells — chỉ cần implement đúng
+    read_external_cells, không cần Google credential/service thật."""
+
+    def __init__(self, responses: dict[tuple[str, str, str], str]):
+        self.responses = responses
+        self.last_refs: list[tuple[str, str, str]] | None = None
+
+    def read_external_cells(self, refs):
+        self.last_refs = refs
+        return {ref: self.responses.get(ref) for ref in refs}
+
+
+def test_resolve_external_cells_reads_both_min_and_max():
+    sheets = _FakeSheetsExternalCells({("sheet-a", "Tab1", "B2"): "10", ("sheet-a", "Tab1", "B3"): "20"})
+    raw_rows = [{
+        "EXTERNAL_SHEET_LINK": "sheet-a",
+        "EXTERNAL_SHEET_NAME": "Tab1",
+        "EXTERNAL_SHEET_CELL": "B2",
+        "EXTERNAL_SHEET_CELL_MAX": "B3",
+    }]
+
+    main._resolve_external_cells(sheets, raw_rows)
+
+    assert raw_rows[0]["_EXTERNAL_PRICE_MIN_RESOLVED"] == "10"
+    assert raw_rows[0]["_EXTERNAL_PRICE_MAX_RESOLVED"] == "20"
+    assert set(sheets.last_refs) == {("sheet-a", "Tab1", "B2"), ("sheet-a", "Tab1", "B3")}
+
+
+def test_resolve_external_cells_only_min_filled_skips_max():
+    """Cell Max để trống -> chỉ đọc Cell Min, không đọc/không gắn khoá Max
+    (1 dòng có thể chỉ cần external cho Min hoặc chỉ cho Max, không bắt buộc
+    cả hai)."""
+    sheets = _FakeSheetsExternalCells({("sheet-a", "Tab1", "B2"): "10"})
+    raw_rows = [{
+        "EXTERNAL_SHEET_LINK": "sheet-a",
+        "EXTERNAL_SHEET_NAME": "Tab1",
+        "EXTERNAL_SHEET_CELL": "B2",
+        "EXTERNAL_SHEET_CELL_MAX": "",
+    }]
+
+    main._resolve_external_cells(sheets, raw_rows)
+
+    assert raw_rows[0]["_EXTERNAL_PRICE_MIN_RESOLVED"] == "10"
+    assert "_EXTERNAL_PRICE_MAX_RESOLVED" not in raw_rows[0]
+    assert sheets.last_refs == [("sheet-a", "Tab1", "B2")]
+
+
+def test_resolve_external_cells_noop_when_no_link_filled():
+    sheets = _FakeSheetsExternalCells({})
+    raw_rows = [{"EXTERNAL_SHEET_LINK": "", "EXTERNAL_SHEET_NAME": "", "EXTERNAL_SHEET_CELL": "", "EXTERNAL_SHEET_CELL_MAX": ""}]
+
+    main._resolve_external_cells(sheets, raw_rows)
+
+    assert sheets.last_refs is None  # không gọi API nếu không có ref nào cần đọc
+    assert raw_rows[0] == {"EXTERNAL_SHEET_LINK": "", "EXTERNAL_SHEET_NAME": "", "EXTERNAL_SHEET_CELL": "", "EXTERNAL_SHEET_CELL_MAX": ""}
+
+
 @pytest.mark.asyncio
 async def test_check_and_apply_update_noop_when_no_new_commit(monkeypatch):
     monkeypatch.setattr(updater, "check_for_update", lambda branch: False)

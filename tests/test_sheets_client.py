@@ -131,10 +131,10 @@ def test_extract_spreadsheet_id_invalid_returns_none():
     assert extract_spreadsheet_id("không phải url hợp lệ") is None
 
 
-def test_read_external_price_mins_groups_by_spreadsheet_and_isolates_errors():
+def test_read_external_cells_groups_by_spreadsheet_and_isolates_errors():
     """1 spreadsheet lỗi (vd 403 chưa share) không được làm hỏng việc đọc
     những spreadsheet KHÁC trong cùng 1 lần gọi — xem docstring
-    read_external_price_mins trong sheets_client.py."""
+    read_external_cells trong sheets_client.py."""
     client = SheetsClient.__new__(SheetsClient)
     fake_service = MagicMock()
 
@@ -151,13 +151,13 @@ def test_read_external_price_mins_groups_by_spreadsheet_and_isolates_errors():
     client._lock = threading.Lock()
 
     refs = [("sheet-a", "Tab1", "B2"), ("sheet-b", "Tab1", "C3")]
-    result = client.read_external_price_mins(refs)
+    result = client.read_external_cells(refs)
 
     assert result[("sheet-a", "Tab1", "B2")] == "1.23"
     assert result[("sheet-b", "Tab1", "C3")] is None
 
 
-def test_read_external_price_mins_empty_cell_returns_none():
+def test_read_external_cells_empty_cell_returns_none():
     client = SheetsClient.__new__(SheetsClient)
     fake_service = MagicMock()
     fake_service.values.return_value.batchGet.return_value.execute.return_value = {
@@ -166,9 +166,28 @@ def test_read_external_price_mins_empty_cell_returns_none():
     client._service = fake_service
     client._lock = threading.Lock()
 
-    result = client.read_external_price_mins([("sheet-a", "Tab1", "B2")])
+    result = client.read_external_cells([("sheet-a", "Tab1", "B2")])
 
     assert result[("sheet-a", "Tab1", "B2")] is None
+
+
+def test_read_external_cells_error_log_mentions_max_and_cell_ref(caplog):
+    """Bug phát hiện qua code review: log lỗi từng hardcode 'Lỗi đọc Price
+    Min' dù method này giờ phục vụ CẢ Price Max — dòng chỉ bật Cell Max (để
+    trống Cell Min) mà lỗi vẫn phải log rõ đang đọc ô nào, không được nói
+    nhầm là đang đọc Price Min."""
+    client = SheetsClient.__new__(SheetsClient)
+    fake_service = MagicMock()
+    fake_service.values.return_value.batchGet.return_value.execute.side_effect = Exception("403 chưa share")
+    client._service = fake_service
+    client._lock = threading.Lock()
+
+    with caplog.at_level("WARNING"):
+        client.read_external_cells([("sheet-a", "Tab1", "B3")])
+
+    log_text = " ".join(r.message for r in caplog.records)
+    assert "Tab1!B3" in log_text
+    assert "Price Max" in log_text
 
 
 def test_write_result_logs_link_when_all_retries_fail(monkeypatch, caplog):

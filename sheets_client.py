@@ -3,11 +3,12 @@ không tham chiếu chéo tràn lan như thiết kế ban đầu (đã bỏ theo
 2026-09-13: mọi giá trị stock/giá sàn/giá trần nằm THẲNG trong từng dòng sản
 phẩm, giống schema phẳng của tool G2G Repricer sibling).
 
-NGOẠI LỆ (thêm sau, theo yêu cầu khác của user): khi Price Min thật sự nằm ở
-1 sheet KHÁC, `read_external_price_mins()` bên dưới đọc TRỰC TIẾP qua Sheets
-API (không phải IMPORTRANGE, không bị lag) — chỉ áp dụng cho đúng 1 giá trị
-Price Min, chỉ kích hoạt khi dòng đó chủ động điền cột 'Link Sheet'/'Name
-Sheet'/'Cell Min', khác hẳn cơ chế tham chiếu chéo toàn diện đã bỏ.
+NGOẠI LỆ (thêm sau, theo yêu cầu khác của user): khi Price Min và/hoặc Price
+Max thật sự nằm ở 1 sheet KHÁC, `read_external_cells()` bên dưới đọc TRỰC
+TIẾP qua Sheets API (không phải IMPORTRANGE, không bị lag) — chỉ áp dụng cho
+đúng 2 giá trị Price Min/Price Max, chỉ kích hoạt khi dòng đó chủ động điền
+cột 'Link Sheet'/'Name Sheet' + 'Cell Min' và/hoặc 'Cell Max', khác hẳn cơ
+chế tham chiếu chéo toàn diện đã bỏ.
 
 Đọc dữ liệu theo VỊ TRÍ CỘT (`sheet_schema.INTERNAL_KEYS`), KHÔNG theo chữ ở
 dòng 1 — nhờ vậy dòng 1 có thể dùng nhãn tiếng Việt ngắn gọn cho nhân viên dễ
@@ -36,7 +37,7 @@ _SPREADSHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
 def extract_spreadsheet_id(url: str) -> str | None:
     """Lấy spreadsheet ID từ URL Google Sheets dạng
     `.../spreadsheets/d/<ID>/edit#gid=...` — dùng cho cột 'Link Sheet' (đọc
-    Price Min trực tiếp từ sheet KHÁC, xem read_external_price_mins bên
+    Price Min/Price Max trực tiếp từ sheet KHÁC, xem read_external_cells bên
     dưới). Cũng chấp nhận trường hợp người dùng dán thẳng spreadsheet ID
     (không phải URL đầy đủ) để đỡ phải bắt lỗi nhập sai định dạng."""
     if not url:
@@ -201,19 +202,20 @@ class SheetsClient:
         with self._lock:
             self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body={"requests": requests}).execute()
 
-    def read_external_price_mins(
+    def read_external_cells(
         self, refs: list[tuple[str, str, str]]
     ) -> dict[tuple[str, str, str], str | None]:
-        """Đọc Price Min TRỰC TIẾP qua Sheets API từ 1 hay nhiều sheet KHÁC
-        sheet cấu hình chính (cột 'Link Sheet'/'Name Sheet'/'Cell Min') —
-        thay cho công thức IMPORTRANGE, vốn bị delay/lag không cập nhật kịp
-        thời (yêu cầu người dùng, không phải cơ chế tham chiếu chéo cũ đã bỏ
-        2026-09-13 — cơ chế cũ đọc MỌI giá trị chéo sheet; cái này CHỈ đọc
-        Price Min, và CHỈ khi người dùng chủ động điền 3 cột trên).
+        """Đọc Price Min/Price Max TRỰC TIẾP qua Sheets API từ 1 hay nhiều
+        sheet KHÁC sheet cấu hình chính (cột 'Link Sheet'/'Name Sheet'/'Cell
+        Min'/'Cell Max') — thay cho công thức IMPORTRANGE, vốn bị delay/lag
+        không cập nhật kịp thời (yêu cầu người dùng, không phải cơ chế tham
+        chiếu chéo cũ đã bỏ 2026-09-13 — cơ chế cũ đọc MỌI giá trị chéo sheet;
+        cái này CHỈ đọc đúng 2 giá trị Price Min/Price Max, và CHỈ khi người
+        dùng chủ động điền các cột trên).
 
         `refs` là danh sách (spreadsheet_id, sheet_name, cell) cần đọc, gom 1
-        LẦN cho cả chu kỳ (xem main._resolve_external_price_mins) — không
-        đọc riêng từng dòng để tránh gọi API nhiều lần/dễ vượt quota.
+        LẦN cho cả chu kỳ (xem main._resolve_external_cells) — không đọc
+        riêng từng dòng để tránh gọi API nhiều lần/dễ vượt quota.
 
         Gom theo spreadsheet_id: mỗi spreadsheet ID chỉ gọi ĐÚNG 1 lần
         `values().batchGet()` cho mọi cell cần đọc trong đó. 1 spreadsheet
@@ -239,10 +241,11 @@ class SheetsClient:
                     values = value_range.get("values")
                     result[ref] = values[0][0] if values and values[0] else None
             except Exception as e:
+                cells = ", ".join(f"{sheet_name}!{cell}" for _sid, sheet_name, cell in spreadsheet_refs)
                 logger.warning(
-                    "[sheets] Lỗi đọc Price Min từ sheet ngoài (spreadsheetId=%s): %s — "
+                    "[sheets] Lỗi đọc Price Min/Price Max từ sheet ngoài (spreadsheetId=%s, ô: %s): %s — "
                     "kiểm tra đã share quyền Viewer cho service account, đúng tên tab và đúng ô chưa.",
-                    spreadsheet_id, e,
+                    spreadsheet_id, cells, e,
                 )
                 for ref in spreadsheet_refs:
                     result[ref] = None

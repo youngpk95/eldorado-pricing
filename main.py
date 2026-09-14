@@ -61,43 +61,54 @@ def _compute_loop_delay(rows: list[ProductRow]) -> float:
     return max(relax_values) if relax_values else config.LOOP_DELAY_SECONDS
 
 
-def _resolve_external_price_mins(sheets: SheetsClient, raw_rows: list[dict[str, str]]) -> None:
-    """Gom mọi dòng đã điền Link Sheet/Name Sheet/Cell Min, đọc Price Min
-    trực tiếp qua Sheets API ĐÚNG 1 LẦN cho cả chu kỳ (không đọc riêng từng
-    dòng) — tránh lag của công thức IMPORTRANGE mà vẫn không tốn thêm nhiều
-    lượt gọi API. Gắn kết quả tạm vào raw_rows (khoá
-    "_EXTERNAL_PRICE_MIN_RESOLVED") — RowConfig.price_min ở
-    product_pipeline.py đọc lại khoá này. Chạy đồng bộ, gọi qua
-    asyncio.to_thread từ run_one_cycle bên dưới."""
-    refs_by_row: dict[int, tuple[str, str, str]] = {}
+# (resolved_key ghi tạm vào raw row) <- (tên cột Cell Min/Cell Max tương ứng)
+# — dùng chung Link Sheet/Name Sheet, chỉ khác đúng 1 cột ô cho mỗi loại giá.
+_EXTERNAL_CELL_FIELDS = [
+    ("_EXTERNAL_PRICE_MIN_RESOLVED", "EXTERNAL_SHEET_CELL"),
+    ("_EXTERNAL_PRICE_MAX_RESOLVED", "EXTERNAL_SHEET_CELL_MAX"),
+]
+
+
+def _resolve_external_cells(sheets: SheetsClient, raw_rows: list[dict[str, str]]) -> None:
+    """Gom mọi dòng đã điền Link Sheet/Name Sheet + Cell Min và/hoặc Cell
+    Max, đọc Price Min/Price Max trực tiếp qua Sheets API ĐÚNG 1 LẦN cho cả
+    chu kỳ (không đọc riêng từng dòng) — tránh lag của công thức IMPORTRANGE
+    mà vẫn không tốn thêm nhiều lượt gọi API. Gắn kết quả tạm vào raw_rows
+    (khoá "_EXTERNAL_PRICE_MIN_RESOLVED"/"_EXTERNAL_PRICE_MAX_RESOLVED") —
+    RowConfig.price_min/price_max ở product_pipeline.py đọc lại các khoá
+    này. Chạy đồng bộ, gọi qua asyncio.to_thread từ run_one_cycle bên dưới."""
+    refs_by_row_field: dict[tuple[int, str], tuple[str, str, str]] = {}
     unique_refs: set[tuple[str, str, str]] = set()
     for i, raw in enumerate(raw_rows):
         link = (raw.get("EXTERNAL_SHEET_LINK") or "").strip()
         sheet_name = (raw.get("EXTERNAL_SHEET_NAME") or "").strip()
-        cell = (raw.get("EXTERNAL_SHEET_CELL") or "").strip()
-        if not (link and sheet_name and cell):
+        if not (link and sheet_name):
             continue
         spreadsheet_id = extract_spreadsheet_id(link)
         if not spreadsheet_id:
             logger.warning("[external-sheet] Dòng %d: Link Sheet không hợp lệ, không lấy được spreadsheet ID: %s", i, link)
             continue
-        ref = (spreadsheet_id, sheet_name, cell)
-        refs_by_row[i] = ref
-        unique_refs.add(ref)
+        for resolved_key, cell_field in _EXTERNAL_CELL_FIELDS:
+            cell = (raw.get(cell_field) or "").strip()
+            if not cell:
+                continue
+            ref = (spreadsheet_id, sheet_name, cell)
+            refs_by_row_field[(i, resolved_key)] = ref
+            unique_refs.add(ref)
 
     if not unique_refs:
         return
 
-    results = sheets.read_external_price_mins(list(unique_refs))
-    for i, ref in refs_by_row.items():
+    results = sheets.read_external_cells(list(unique_refs))
+    for (i, resolved_key), ref in refs_by_row_field.items():
         value = results.get(ref)
         if value:
-            raw_rows[i]["_EXTERNAL_PRICE_MIN_RESOLVED"] = value
+            raw_rows[i][resolved_key] = value
 
 
 async def run_one_cycle(sheets: SheetsClient, client: EldoradoClient, semaphore: asyncio.Semaphore) -> float:
     raw_rows = await asyncio.to_thread(sheets.read_config_rows)
-    await asyncio.to_thread(_resolve_external_price_mins, sheets, raw_rows)
+    await asyncio.to_thread(_resolve_external_cells, sheets, raw_rows)
     rows = [ProductRow(index=i, raw=raw) for i, raw in enumerate(raw_rows)]
     logger.info("Có %d sản phẩm trong sheet.", len(rows))
 

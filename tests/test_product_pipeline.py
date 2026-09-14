@@ -477,6 +477,75 @@ def test_row_config_external_price_min_warning_present_when_resolved_value_not_n
     assert cfg.external_price_min_warning is not None  # nhưng PHẢI có cảnh báo
 
 
+def test_row_config_price_max_uses_external_resolved_value_when_present():
+    """Price Max dùng chung Link Sheet/Name Sheet với Price Min, nhưng đọc
+    qua cột Cell Max riêng — độc lập với việc Price Min có bật external hay
+    không (1 dòng có thể chỉ bật external cho 1 trong 2)."""
+    row = make_row(
+        PRICE_MAX="200",
+        EXTERNAL_SHEET_LINK="https://docs.google.com/spreadsheets/d/abc123/edit",
+        EXTERNAL_SHEET_NAME="Tab1",
+        EXTERNAL_SHEET_CELL_MAX="B3",
+        _EXTERNAL_PRICE_MAX_RESOLVED="150",
+    )
+    cfg = RowConfig(row)
+
+    assert cfg.has_external_price_max is True
+    assert cfg.has_external_price_min is False  # không điền Cell Min -> Price Min vẫn đọc tại chỗ
+    assert cfg.price_max == Decimal("150")
+    assert cfg.external_price_max_warning is None
+
+
+def test_row_config_price_max_falls_back_to_local_when_external_unresolved():
+    row = make_row(
+        PRICE_MAX="200",
+        EXTERNAL_SHEET_LINK="https://docs.google.com/spreadsheets/d/abc123/edit",
+        EXTERNAL_SHEET_NAME="Tab1",
+        EXTERNAL_SHEET_CELL_MAX="B3",
+    )
+    cfg = RowConfig(row)
+
+    assert cfg.price_max == Decimal("200")
+    assert cfg.external_price_max_warning is not None
+
+
+def test_row_config_min_and_max_external_resolve_independently():
+    """Cả 2 cùng bật, 1 cái đọc thành công 1 cái lỗi — mỗi cái phải fallback
+    ĐỘC LẬP, không được để 1 cái lỗi kéo cái kia theo."""
+    row = make_row(
+        PRICE_MIN="10", PRICE_MAX="200",
+        EXTERNAL_SHEET_LINK="https://docs.google.com/spreadsheets/d/abc123/edit",
+        EXTERNAL_SHEET_NAME="Tab1",
+        EXTERNAL_SHEET_CELL="B2", EXTERNAL_SHEET_CELL_MAX="B3",
+        _EXTERNAL_PRICE_MIN_RESOLVED="42.5",
+        # Price Max KHÔNG resolve -> phải fallback về PRICE_MAX tại chỗ
+    )
+    cfg = RowConfig(row)
+
+    assert cfg.price_min == Decimal("42.5")
+    assert cfg.external_price_min_warning is None
+    assert cfg.price_max == Decimal("200")
+    assert cfg.external_price_max_warning is not None
+
+
+def test_row_config_price_min_none_and_warns_correctly_when_local_fallback_not_numeric():
+    """Bug phát hiện qua code review: nếu external lỗi VÀ cột Price Min tại
+    chỗ cũng không phải số (vd gõ nhầm chữ), price_min phải là None (KHÔNG
+    có giá sàn) — cảnh báo KHÔNG được tuyên bố sai là "đang dùng tạm" giá trị
+    đó, vì giá trị đó không parse được thành số."""
+    row = make_row(
+        PRICE_MIN="không phải số",
+        EXTERNAL_SHEET_LINK="https://docs.google.com/spreadsheets/d/abc123/edit",
+        EXTERNAL_SHEET_NAME="Tab1",
+        EXTERNAL_SHEET_CELL="B2",
+    )
+    cfg = RowConfig(row)
+
+    assert cfg.price_min is None
+    assert cfg.external_price_min_warning is not None
+    assert "Đang dùng tạm" not in cfg.external_price_min_warning
+
+
 def test_row_config_price_min_none_when_external_unresolved_and_no_local_fallback():
     """Đọc external thất bại VÀ Price Min tại chỗ cũng trống -> None (không
     có giá sàn), nhưng vẫn phải có cảnh báo khác với trường hợp có fallback."""

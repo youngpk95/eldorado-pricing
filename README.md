@@ -26,9 +26,9 @@ pip install -r requirements.txt
      vào `.env` cho bước này (`GOOGLE_SERVICE_ACCOUNT_JSON` chỉ dùng nếu
      thật sự muốn cách cũ: dán JSON thành 1 dòng hoặc ghi đường dẫn file).
      Service account phải có quyền Editor vào sheet cấu hình chính; nếu dùng
-     Price Min từ sheet khác — xem mục "Price Min từ sheet khác" bên dưới —
-     cũng phải share quyền Viewer cho đúng email service account vào TỪNG
-     sheet ngoài đó.
+     Price Min/Price Max từ sheet khác — xem mục "Price Min/Price Max từ
+     sheet khác" bên dưới — cũng phải share quyền Viewer cho đúng email
+     service account vào TỪNG sheet ngoài đó.
    - `SHEET_CONFIG_ID`/`CONFIG_RANGE`: giữ nguyên từ bản gốc (`config.ini`
      cũ, mục `[Sheets]`) nếu muốn dùng lại đúng sheet đang có.
    - `GIT_BRANCH`/`UPDATE_CHECK_INTERVAL_SECONDS`: xem mục "Tự cập nhật từ
@@ -65,26 +65,37 @@ pip install pytest pytest-asyncio
 pytest tests/ -v
 ```
 
-## Price Min từ sheet khác (không dùng IMPORTRANGE)
+## Price Min/Price Max từ sheet khác (không dùng IMPORTRANGE)
 
-Nếu Price Min thật sự nằm ở 1 Google Sheet KHÁC (không phải sheet cấu hình
-chính), điền 3 cột `Link Sheet` / `Name Sheet` / `Cell Min` ở cuối bảng cho
-dòng đó — tool sẽ tự đọc TRỰC TIẾP qua Google Sheets API (không phải công
-thức `IMPORTRANGE`, nên không bị delay/lag). Để trống cả 3 cột này thì hành
-vi y hệt như trước: dùng thẳng cột `Price Min` tại chỗ.
+Nếu Price Min và/hoặc Price Max thật sự nằm ở 1 Google Sheet KHÁC (không
+phải sheet cấu hình chính), điền các cột `Link Sheet` / `Name Sheet` /
+`Cell Min` / `Cell Max` ở cuối bảng cho dòng đó — tool sẽ tự đọc TRỰC TIẾP
+qua Google Sheets API (không phải công thức `IMPORTRANGE`, nên không bị
+delay/lag). Để trống thì hành vi y hệt như trước: dùng thẳng cột `Price
+Min`/`Price Max` tại chỗ.
 
-- `Link Sheet`: URL đầy đủ của sheet khác đó.
-- `Name Sheet`: tên tab (sheet name) chứa Price Min bên trong file đó.
-- `Cell Min`: ô chứa giá, vd `B5`.
+- `Link Sheet`: URL đầy đủ (hoặc thẳng spreadsheet ID) của sheet khác đó.
+- `Name Sheet`: tên tab (sheet name) chứa Price Min/Price Max bên trong file
+  đó — dùng chung cho cả Min lẫn Max (2 giá trị nằm trong CÙNG 1 sheet
+  ngoài, chỉ khác ô).
+- `Cell Min`: ô chứa giá Price Min, vd `B5`. Để trống nếu dòng này chỉ cần
+  lấy Price Max từ sheet ngoài.
+- `Cell Max`: ô chứa giá Price Max, vd `B6`. Để trống nếu dòng này chỉ cần
+  lấy Price Min từ sheet ngoài.
+
+Bật external cho Min và Max **độc lập nhau** — 1 dòng có thể chỉ bật 1
+trong 2 (điền `Cell Min`, để trống `Cell Max`, hoặc ngược lại), hoặc cả hai.
 
 **Bắt buộc:** sheet ngoài đó phải được **share quyền Viewer** cho đúng email
-service account đang dùng (`GOOGLE_SERVICE_ACCOUNT_JSON`), nếu không tool sẽ
-không đọc được.
+service account đang dùng (`client_email` trong file `.json` ở
+`service_account/`), nếu không tool sẽ không đọc được.
 
-Tool gom đọc **1 lần cho cả chu kỳ** (không đọc riêng từng dòng) để tránh
-tốn quota. Nếu đọc lỗi (chưa share quyền, sai tên tab, sai ô...), tool tự
-**fallback về giá trị cột `Price Min` tại chỗ** (nếu có) để dòng không bị
-treo hoàn toàn, đồng thời ghi cảnh báo rõ ràng vào `Status` để biết mà sửa.
+Tool gom đọc **1 lần cho cả chu kỳ** (không đọc riêng từng dòng/từng giá
+trị) để tránh tốn quota. Nếu đọc lỗi (chưa share quyền, sai tên tab, sai
+ô...), tool tự **fallback về giá trị cột `Price Min`/`Price Max` tại chỗ**
+(nếu có) để dòng không bị treo hoàn toàn, đồng thời ghi cảnh báo rõ ràng vào
+`Status` để biết mà sửa — Min và Max fallback ĐỘC LẬP nhau, 1 cái lỗi không
+kéo cái kia theo.
 
 ## Tự cập nhật từ GitHub
 
@@ -103,18 +114,19 @@ lại ở chu kỳ kiểm tra sau, KHÔNG bao giờ tự restart khi chưa chắ
 đã pull thành công trọn vẹn (dùng `--ff-only`, không bao giờ tự tạo merge
 commit hay đè conflict âm thầm).
 
-## Cấu trúc cột sheet (schema PHẲNG — 24 cột)
+## Cấu trúc cột sheet (schema PHẲNG — 25 cột)
 
 Không còn tham chiếu chéo tràn lan sang sheet khác như thiết kế ban đầu của
-bản gốc — mọi giá trị nằm THẲNG trong dòng sản phẩm (ngoại lệ duy nhất: 3
-cột `Link Sheet`/`Name Sheet`/`Cell Min` để đọc riêng Price Min từ sheet
-khác qua Sheets API, xem mục "Price Min từ sheet khác" bên trên — vẫn CHỦ
-ĐỘNG điền mới kích hoạt, khác cơ chế tham chiếu chéo toàn diện đã bỏ). Định
+bản gốc — mọi giá trị nằm THẲNG trong dòng sản phẩm (ngoại lệ duy nhất: 4
+cột `Link Sheet`/`Name Sheet`/`Cell Min`/`Cell Max` để đọc riêng Price
+Min/Price Max từ sheet khác qua Sheets API, xem mục "Price Min/Price Max từ
+sheet khác" bên trên — vẫn CHỦ ĐỘNG điền mới kích hoạt, khác cơ chế tham
+chiếu chéo toàn diện đã bỏ). Định
 nghĩa DUY NHẤT nằm trong `sheet_schema.py` (tên cột nội bộ + nhãn hiển thị
 tiếng Anh ngắn gọn ở dòng 1 + chú thích chi tiết gắn vào từng ô header —
 nhân viên rê chuột vào ô header trên Google Sheets sẽ thấy giải thích đầy
 đủ). Chạy `python scripts/setup_sheet_headers.py` để tự động thiết lập đúng
-24 cột này cho 1 tab mới — script sẽ:
+25 cột này cho 1 tab mới — script sẽ:
 1. XOÁ SẠCH dữ liệu cũ trong tab (chỉ chạy khi chắc chắn muốn reset),
 2. Ghi nhãn + chú thích cho dòng 1,
 3. Đặt **checkbox thật** (Data Validation kiểu BOOLEAN) cho cột `Enabled`
@@ -126,16 +138,16 @@ sửa lại nhãn tiếng Việt cho dễ hiểu hơn nữa mà không sợ hỏ
 tự ý thêm/xoá/đổi thứ tự cột (muốn đổi thứ tự cột thật sự thì sửa
 `sheet_schema.py` rồi chạy lại script thiết lập).
 
-Xem đầy đủ 21 cột + giải thích trong `sheet_schema.py` (`COLUMNS`), hoặc mở
+Xem đầy đủ 25 cột + giải thích trong `sheet_schema.py` (`COLUMNS`), hoặc mở
 sheet thật và rê chuột vào từng ô header. Tóm tắt nhanh: `Enabled` (checkbox
 bật/tắt dòng), `Name`, 3 cột tool tự ghi (`Status`/`Updated At`/`New Link`),
 `My Listing URL`/`Compare URL`, `Stock`, `Price Min`/`Price Max`,
 `Discount`/`Round Decimals`/`Always Undercut` (checkbox), `Min Purchase
 Base`/`Min Purchase Step`, 3 cột lọc đối thủ (`Min Competitor Stock`, `Min
 Competitor Ratings`, `Min Feedback %`), `Seller Blacklist`, `Allow
-Recreate on Rate Limit` (checkbox), `Relax (seconds)`, và 3 cột `Link
-Sheet`/`Name Sheet`/`Cell Min` (đọc Price Min từ sheet khác, để trống nếu
-không cần).
+Recreate on Rate Limit` (checkbox), `Relax (seconds)`, và 4 cột `Link
+Sheet`/`Name Sheet`/`Cell Min`/`Cell Max` (đọc Price Min/Price Max từ sheet
+khác, để trống nếu không cần).
 
 **Lưu ý về `Relax (seconds)`:** đây là cấu hình cho CẢ VÒNG CHẠY (nghỉ sau
 khi xong HẾT sản phẩm đang bật), không phải riêng 1 sản phẩm — nếu nhiều
@@ -163,11 +175,12 @@ eldorado_repricer_project.md để biết đúng commit/thời điểm).
   `.exe` — xem mục "Tự cập nhật từ GitHub" bên trên) vì tool giờ chạy như
   script Python, không phải file `.exe` đóng gói phân phối.
 - **Bỏ cơ chế tham chiếu chéo TOÀN DIỆN sang sheet khác** (IDSHEET/SHEET/CELL
-  áp dụng cho MỌI cột của bản gốc) — mọi giá trị (STOCK/PRICE_MAX...) nhập
-  thẳng trong dòng sản phẩm. **Ngoại lệ đã thêm lại sau đó:** riêng Price Min
-  có thể đọc từ sheet khác qua 3 cột `Link Sheet`/`Name Sheet`/`Cell Min`
-  (xem mục "Price Min từ sheet khác" bên trên) — đọc thẳng qua Sheets API,
-  không phải qua `IMPORTRANGE` như cách làm tay trước đó, nên không bị lag.
+  áp dụng cho MỌI cột của bản gốc) — mọi giá trị (STOCK...) nhập thẳng trong
+  dòng sản phẩm. **Ngoại lệ đã thêm lại sau đó:** riêng Price Min/Price Max
+  có thể đọc từ sheet khác qua 4 cột `Link Sheet`/`Name Sheet`/`Cell
+  Min`/`Cell Max` (xem mục "Price Min/Price Max từ sheet khác" bên trên) —
+  đọc thẳng qua Sheets API, không phải qua `IMPORTRANGE` như cách làm tay
+  trước đó, nên không bị lag.
 - **`asyncio` thay `ThreadPoolExecutor`** + **1 Service Account duy nhất**
   (không xoay vòng nhiều SA theo thread) — vì đã bỏ tham chiếu chéo nên áp
   lực quota Sheets cũng giảm hẳn, không cần nhiều SA nữa.
