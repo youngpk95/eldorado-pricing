@@ -1,7 +1,13 @@
-"""Đọc/ghi Google Sheets — 1 sheet DUY NHẤT, không còn tham chiếu chéo sang
-sheet khác (đã bỏ theo yêu cầu user 2026-09-13: mọi giá trị stock/giá sàn/giá
-trần nằm THẲNG trong từng dòng sản phẩm, giống schema phẳng của tool G2G
-Repricer sibling).
+"""Đọc/ghi Google Sheets — sheet cấu hình chính vẫn là 1 sheet DUY NHẤT,
+không tham chiếu chéo tràn lan như thiết kế ban đầu (đã bỏ theo yêu cầu user
+2026-09-13: mọi giá trị stock/giá sàn/giá trần nằm THẲNG trong từng dòng sản
+phẩm, giống schema phẳng của tool G2G Repricer sibling).
+
+NGOẠI LỆ (thêm sau, theo yêu cầu khác của user): khi Price Min thật sự nằm ở
+1 sheet KHÁC, `read_external_price_mins()` bên dưới đọc TRỰC TIẾP qua Sheets
+API (không phải IMPORTRANGE, không bị lag) — chỉ áp dụng cho đúng 1 giá trị
+Price Min, chỉ kích hoạt khi dòng đó chủ động điền cột 'Link Sheet'/'Name
+Sheet'/'Cell Min', khác hẳn cơ chế tham chiếu chéo toàn diện đã bỏ.
 
 Đọc dữ liệu theo VỊ TRÍ CỘT (`sheet_schema.INTERNAL_KEYS`), KHÔNG theo chữ ở
 dòng 1 — nhờ vậy dòng 1 có thể dùng nhãn tiếng Việt ngắn gọn cho nhân viên dễ
@@ -9,6 +15,7 @@ dòng 1 — nhờ vậy dòng 1 có thể dùng nhãn tiếng Việt ngắn gọ
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from datetime import datetime
@@ -22,6 +29,25 @@ from sheet_schema import COLUMNS, INTERNAL_KEYS
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+_SPREADSHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
+
+
+def extract_spreadsheet_id(url: str) -> str | None:
+    """Lấy spreadsheet ID từ URL Google Sheets dạng
+    `.../spreadsheets/d/<ID>/edit#gid=...` — dùng cho cột 'Link Sheet' (đọc
+    Price Min trực tiếp từ sheet KHÁC, xem read_external_price_mins bên
+    dưới). Cũng chấp nhận trường hợp người dùng dán thẳng spreadsheet ID
+    (không phải URL đầy đủ) để đỡ phải bắt lỗi nhập sai định dạng."""
+    if not url:
+        return None
+    match = _SPREADSHEET_ID_RE.search(url)
+    if match:
+        return match.group(1)
+    stripped = url.strip()
+    if stripped and "/" not in stripped and " " not in stripped:
+        return stripped
+    return None
 
 
 class SheetsClient:
@@ -174,6 +200,54 @@ class SheetsClient:
         ]
         with self._lock:
             self._service.batchUpdate(spreadsheetId=config.SHEET_CONFIG_ID, body={"requests": requests}).execute()
+
+    def read_external_price_mins(
+        self, refs: list[tuple[str, str, str]]
+    ) -> dict[tuple[str, str, str], str | None]:
+        """Đọc Price Min TRỰC TIẾP qua Sheets API từ 1 hay nhiều sheet KHÁC
+        sheet cấu hình chính (cột 'Link Sheet'/'Name Sheet'/'Cell Min') —
+        thay cho công thức IMPORTRANGE, vốn bị delay/lag không cập nhật kịp
+        thời (yêu cầu người dùng, không phải cơ chế tham chiếu chéo cũ đã bỏ
+        2026-09-13 — cơ chế cũ đọc MỌI giá trị chéo sheet; cái này CHỈ đọc
+        Price Min, và CHỈ khi người dùng chủ động điền 3 cột trên).
+
+        `refs` là danh sách (spreadsheet_id, sheet_name, cell) cần đọc, gom 1
+        LẦN cho cả chu kỳ (xem main._resolve_external_price_mins) — không
+        đọc riêng từng dòng để tránh gọi API nhiều lần/dễ vượt quota.
+
+        Gom theo spreadsheet_id: mỗi spreadsheet ID chỉ gọi ĐÚNG 1 lần
+        `values().batchGet()` cho mọi cell cần đọc trong đó. 1 spreadsheet
+        lỗi (thường do CHƯA share quyền Viewer cho service account, sai tên
+        tab, hoặc sai ô) không được làm hỏng việc đọc các spreadsheet khác —
+        log cảnh báo riêng, trả None cho đúng những ref thuộc spreadsheet đó."""
+        result: dict[tuple[str, str, str], str | None] = {}
+        by_spreadsheet: dict[str, list[tuple[str, str, str]]] = {}
+        for ref in refs:
+            by_spreadsheet.setdefault(ref[0], []).append(ref)
+
+        for spreadsheet_id, spreadsheet_refs in by_spreadsheet.items():
+            ranges = [f"'{sheet_name}'!{cell}" for _sid, sheet_name, cell in spreadsheet_refs]
+            try:
+                with self._lock:
+                    data = (
+                        self._service.values()
+                        .batchGet(spreadsheetId=spreadsheet_id, ranges=ranges)
+                        .execute()
+                    )
+                value_ranges = data.get("valueRanges", [])
+                for ref, value_range in zip(spreadsheet_refs, value_ranges):
+                    values = value_range.get("values")
+                    result[ref] = values[0][0] if values and values[0] else None
+            except Exception as e:
+                logger.warning(
+                    "[sheets] Lỗi đọc Price Min từ sheet ngoài (spreadsheetId=%s): %s — "
+                    "kiểm tra đã share quyền Viewer cho service account, đúng tên tab và đúng ô chưa.",
+                    spreadsheet_id, e,
+                )
+                for ref in spreadsheet_refs:
+                    result[ref] = None
+
+        return result
 
     WRITE_RESULT_MAX_ATTEMPTS = 3
     WRITE_RESULT_RETRY_DELAY_SECONDS = 2

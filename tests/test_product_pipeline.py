@@ -15,7 +15,7 @@ import config  # noqa: E402  (đảm bảo DRY_RUN mặc định True cho test)
 import offer_cache  # noqa: E402
 from eldorado_api import OfferNotFoundError  # noqa: E402
 from models import OfferUrls, OwnOffer, ProductRow  # noqa: E402
-from product_pipeline import process_product  # noqa: E402
+from product_pipeline import RowConfig, process_product  # noqa: E402
 
 
 class FakeSheets:
@@ -412,3 +412,82 @@ async def test_process_product_dry_run_recovery_skips_real_create(monkeypatch, t
     _, note, link = sheets.writes[0]
     assert "[DRY RUN]" in note
     assert link is None
+
+
+def test_row_config_price_min_uses_local_value_when_no_external_columns():
+    """Không điền Link Sheet/Name Sheet/Cell Min -> hành vi y hệt trước đây,
+    đọc thẳng cột Price Min tại chỗ."""
+    row = make_row(PRICE_MIN="99.5")
+    cfg = RowConfig(row)
+
+    assert cfg.has_external_price_min is False
+    assert cfg.price_min == Decimal("99.5")
+    assert cfg.external_price_min_warning is None
+
+
+def test_row_config_price_min_uses_external_resolved_value_when_present():
+    """Đã điền đủ 3 cột external VÀ main.py đã đọc thành công (gắn vào
+    _EXTERNAL_PRICE_MIN_RESOLVED) -> ưu tiên giá trị đó, không dùng
+    Price Min tại chỗ dù có điền."""
+    row = make_row(
+        PRICE_MIN="10",
+        EXTERNAL_SHEET_LINK="https://docs.google.com/spreadsheets/d/abc123/edit",
+        EXTERNAL_SHEET_NAME="Tab1",
+        EXTERNAL_SHEET_CELL="B2",
+        _EXTERNAL_PRICE_MIN_RESOLVED="42.5",
+    )
+    cfg = RowConfig(row)
+
+    assert cfg.has_external_price_min is True
+    assert cfg.price_min == Decimal("42.5")
+    assert cfg.external_price_min_warning is None
+
+
+def test_row_config_price_min_falls_back_to_local_when_external_unresolved():
+    """Đọc external thất bại (chưa share quyền, sai tab, sai ô...) -> fallback
+    dùng Price Min tại chỗ, KÈM cảnh báo rõ ràng để staff biết mà sửa."""
+    row = make_row(
+        PRICE_MIN="10",
+        EXTERNAL_SHEET_LINK="https://docs.google.com/spreadsheets/d/abc123/edit",
+        EXTERNAL_SHEET_NAME="Tab1",
+        EXTERNAL_SHEET_CELL="B2",
+    )
+    cfg = RowConfig(row)
+
+    assert cfg.price_min == Decimal("10")
+    assert cfg.external_price_min_warning is not None
+    assert "chưa share" in cfg.external_price_min_warning.lower() or "10" in cfg.external_price_min_warning
+
+
+def test_row_config_external_price_min_warning_present_when_resolved_value_not_numeric():
+    """Bug phát hiện qua code review: ô external đọc được (không rỗng) nhưng
+    KHÔNG phải số (vd '#REF!', 'N/A', gõ nhầm ô chứa chữ) trước đây bị coi là
+    "đã resolved" nên KHÔNG có cảnh báo dù thực chất đang âm thầm fallback về
+    Price Min tại chỗ — giờ phải luôn có cảnh báo trong trường hợp này."""
+    row = make_row(
+        PRICE_MIN="10",
+        EXTERNAL_SHEET_LINK="https://docs.google.com/spreadsheets/d/abc123/edit",
+        EXTERNAL_SHEET_NAME="Tab1",
+        EXTERNAL_SHEET_CELL="B2",
+        _EXTERNAL_PRICE_MIN_RESOLVED="#REF!",
+    )
+    cfg = RowConfig(row)
+
+    assert cfg.price_min == Decimal("10")  # vẫn fallback đúng
+    assert cfg.external_price_min_warning is not None  # nhưng PHẢI có cảnh báo
+
+
+def test_row_config_price_min_none_when_external_unresolved_and_no_local_fallback():
+    """Đọc external thất bại VÀ Price Min tại chỗ cũng trống -> None (không
+    có giá sàn), nhưng vẫn phải có cảnh báo khác với trường hợp có fallback."""
+    row = make_row(
+        PRICE_MIN="",
+        EXTERNAL_SHEET_LINK="https://docs.google.com/spreadsheets/d/abc123/edit",
+        EXTERNAL_SHEET_NAME="Tab1",
+        EXTERNAL_SHEET_CELL="B2",
+    )
+    cfg = RowConfig(row)
+
+    assert cfg.price_min is None
+    assert cfg.external_price_min_warning is not None
+    assert "trống" in cfg.external_price_min_warning

@@ -29,6 +29,9 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("SELLER_BLACKLIST", "Seller Blacklist", "Tên seller luôn bị loại khỏi so sánh (cách nhau bằng dấu ;). Tool tự động loại thêm 'CNLTeam' dù không ghi ở đây."),
     ("ALLOW_RECREATE_ON_RATE_LIMIT", "Allow Recreate on Rate Limit", "Tích: cho phép tool tự xoá + tạo lại offer khi Eldorado báo lỗi quá tải (429), VÀ tự tạo lại offer (từ dữ liệu backup) khi phát hiện offer đã bị xoá mất (404) — tự cập nhật luôn My Listing URL sang offer mới. Bỏ tích: tool chỉ báo lỗi ở Status, không tự xoá/tạo/tạo lại gì cả."),
     ("RELAX_SECONDS", "Relax (seconds)", "Số giây NGHỈ sau khi chạy xong HẾT TẤT CẢ sản phẩm đang bật, trước khi bắt đầu vòng chạy tiếp theo — đây là cấu hình cho CẢ VÒNG CHẠY, không phải riêng sản phẩm này. Nếu nhiều sản phẩm đang bật có số khác nhau, tool lấy số LỚN NHẤT. Để trống = dùng mặc định trong .env (LOOP_DELAY_SECONDS)."),
+    ("EXTERNAL_SHEET_LINK", "Link Sheet", "CHỈ điền khi Price Min THẬT nằm ở 1 Google Sheet KHÁC (không phải sheet này) — dán URL sheet đó vào đây. Để trống nếu Price Min đã điền thẳng ở cột 'Price Min' bên trên (cùng sheet thì không cần 3 cột Link Sheet/Name Sheet/Cell Min này). Sheet đó phải share quyền Viewer cho đúng email service account đang dùng, nếu không tool sẽ không đọc được."),
+    ("EXTERNAL_SHEET_NAME", "Name Sheet", "Tên tab (sheet name, hiện ở dưới cùng file Google Sheets) chứa Price Min, bên trong file ở cột 'Link Sheet'."),
+    ("EXTERNAL_SHEET_CELL", "Cell Min", "Ô chứa giá Price Min bên trong tab ở cột 'Name Sheet', vd: B5."),
 ]
 
 INTERNAL_KEYS: list[str] = [key for key, _, _ in COLUMNS]

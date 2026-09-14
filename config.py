@@ -45,3 +45,8 @@ ELDORADO_WRITE_DELAY_MS = float(_get("ELDORADO_WRITE_DELAY_MS", "300"))
 ELDORADO_TIMEOUT_SECONDS = float(_get("ELDORADO_TIMEOUT_SECONDS", "20"))
 
 DRY_RUN = _get("DRY_RUN", "true").strip().lower() != "false"
+
+# Tự cập nhật từ GitHub (xem updater.py) — nhánh theo dõi + tần suất kiểm
+# tra. Không cần GITHUB_TOKEN: dùng lại git credential đã cache sẵn trên máy.
+GIT_BRANCH = _get("GIT_BRANCH", "master")
+UPDATE_CHECK_INTERVAL_SECONDS = float(_get("UPDATE_CHECK_INTERVAL_SECONDS", "300"))

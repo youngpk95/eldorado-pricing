@@ -1,12 +1,15 @@
 """Entrypoint — vòng lặp vô hạn: đọc sheet, xử lý mọi sản phẩm SONG SONG (giới
 hạn qua Semaphore), nghỉ, lặp lại. Thay cho ThreadPoolExecutor + nhiều Service
-Account xoay vòng của bản gốc (main.py cũ)."""
+Account xoay vòng của bản gốc (main.py cũ). Sau mỗi chu kỳ (điểm an toàn,
+không có task dở dang) còn tự kiểm tra + tự cập nhật code từ GitHub nếu tới
+kỳ hạn — xem updater.py."""
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
 import logging.handlers
+import os
 import sys
 from pathlib import Path
 
@@ -19,11 +22,12 @@ if sys.stderr.encoding != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
 import config
+import updater
 from eldo_auth import EldoradoAuth
 from eldorado_api import EldoradoClient
 from models import ProductRow
 from product_pipeline import RowConfig, process_product
-from sheets_client import SheetsClient
+from sheets_client import SheetsClient, extract_spreadsheet_id
 
 # Ghi log ra CẢ file lẫn console — đóng terminal/tắt máy không còn làm mất
 # lịch sử log, mai quay lại vẫn xem được lỗi/bug đã xảy ra qua đêm. Xoay
@@ -57,8 +61,43 @@ def _compute_loop_delay(rows: list[ProductRow]) -> float:
     return max(relax_values) if relax_values else config.LOOP_DELAY_SECONDS
 
 
+def _resolve_external_price_mins(sheets: SheetsClient, raw_rows: list[dict[str, str]]) -> None:
+    """Gom mọi dòng đã điền Link Sheet/Name Sheet/Cell Min, đọc Price Min
+    trực tiếp qua Sheets API ĐÚNG 1 LẦN cho cả chu kỳ (không đọc riêng từng
+    dòng) — tránh lag của công thức IMPORTRANGE mà vẫn không tốn thêm nhiều
+    lượt gọi API. Gắn kết quả tạm vào raw_rows (khoá
+    "_EXTERNAL_PRICE_MIN_RESOLVED") — RowConfig.price_min ở
+    product_pipeline.py đọc lại khoá này. Chạy đồng bộ, gọi qua
+    asyncio.to_thread từ run_one_cycle bên dưới."""
+    refs_by_row: dict[int, tuple[str, str, str]] = {}
+    unique_refs: set[tuple[str, str, str]] = set()
+    for i, raw in enumerate(raw_rows):
+        link = (raw.get("EXTERNAL_SHEET_LINK") or "").strip()
+        sheet_name = (raw.get("EXTERNAL_SHEET_NAME") or "").strip()
+        cell = (raw.get("EXTERNAL_SHEET_CELL") or "").strip()
+        if not (link and sheet_name and cell):
+            continue
+        spreadsheet_id = extract_spreadsheet_id(link)
+        if not spreadsheet_id:
+            logger.warning("[external-sheet] Dòng %d: Link Sheet không hợp lệ, không lấy được spreadsheet ID: %s", i, link)
+            continue
+        ref = (spreadsheet_id, sheet_name, cell)
+        refs_by_row[i] = ref
+        unique_refs.add(ref)
+
+    if not unique_refs:
+        return
+
+    results = sheets.read_external_price_mins(list(unique_refs))
+    for i, ref in refs_by_row.items():
+        value = results.get(ref)
+        if value:
+            raw_rows[i]["_EXTERNAL_PRICE_MIN_RESOLVED"] = value
+
+
 async def run_one_cycle(sheets: SheetsClient, client: EldoradoClient, semaphore: asyncio.Semaphore) -> float:
     raw_rows = await asyncio.to_thread(sheets.read_config_rows)
+    await asyncio.to_thread(_resolve_external_price_mins, sheets, raw_rows)
     rows = [ProductRow(index=i, raw=raw) for i, raw in enumerate(raw_rows)]
     logger.info("Có %d sản phẩm trong sheet.", len(rows))
 
@@ -72,12 +111,52 @@ async def run_one_cycle(sheets: SheetsClient, client: EldoradoClient, semaphore:
     return _compute_loop_delay(rows)
 
 
+async def _check_and_apply_update(client: EldoradoClient) -> None:
+    """Tự kiểm tra + tự cập nhật code khi nhánh GitHub đang theo dõi có
+    commit mới — CHỈ được gọi ở ĐIỂM AN TOÀN trong main() (ngay sau khi 1 chu
+    kỳ repricing đã chạy xong hoàn toàn, không có task nào đang dở dang), vì
+    đây là tool production (DRY_RUN có thể =False, đang chạy live) — không
+    được restart giữa chừng lúc đang xử lý sản phẩm. Lỗi ở đây (mất mạng, git
+    pull conflict...) chỉ log, không được làm crash vòng lặp chính."""
+    try:
+        if not await asyncio.to_thread(updater.check_for_update, config.GIT_BRANCH):
+            return
+        logger.info(
+            "[updater] Phát hiện bản cập nhật mới trên GitHub (branch %s), đang pull...",
+            config.GIT_BRANCH,
+        )
+        if not await asyncio.to_thread(updater.pull_update, config.GIT_BRANCH):
+            return
+    except Exception:
+        logger.exception("[updater] Lỗi không mong đợi khi kiểm tra/áp dụng cập nhật GitHub — bỏ qua.")
+        return
+
+    # Từ đây trở đi KHÔNG được nuốt lỗi im lặng nữa: client sắp bị đóng, nếu
+    # os.execv thất bại (vd sys.executable bị xoá/đổi chỗ, bị AV chặn...) mà
+    # vẫn tiếp tục vòng lặp chính với client ĐÃ ĐÓNG, mọi sản phẩm sau đó sẽ
+    # âm thầm lỗi hết (httpx báo "client has been closed") mà log không nói
+    # rõ nguyên nhân gốc — thà crash tiến trình ngay để lộ lỗi rõ ràng, còn
+    # hơn chạy ngầm hỏng không ai biết (tool production, DRY_RUN=False).
+    logger.info("[updater] Đã pull xong — đang đóng kết nối và khởi động lại process để dùng code mới...")
+    await client.aclose()
+    try:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception:
+        logger.critical(
+            "[updater] os.execv thất bại SAU KHI đã đóng client — không thể tiếp tục xử lý sản phẩm an "
+            "toàn nữa. Đang dừng hẳn tiến trình (cần khởi động lại tool thủ công) thay vì chạy ngầm hỏng.",
+            exc_info=True,
+        )
+        raise
+
+
 async def main() -> None:
     logger.info("Khởi động Eldorado Repricer — DRY_RUN=%s", config.DRY_RUN)
     sheets = SheetsClient()
     auth = EldoradoAuth()
     client = EldoradoClient(get_cookie=auth.get_cookie)
     semaphore = asyncio.Semaphore(config.CONCURRENCY_LIMIT)
+    last_update_check = 0.0
 
     try:
         while True:
@@ -89,6 +168,12 @@ async def main() -> None:
                 logger.exception("Lỗi ở 1 chu kỳ chạy — bỏ qua, thử lại chu kỳ sau.")
             elapsed = asyncio.get_event_loop().time() - started
             logger.info("Hoàn tất 1 chu kỳ trong %.1fs. Nghỉ %ss...", elapsed, loop_delay)
+
+            now = asyncio.get_event_loop().time()
+            if now - last_update_check >= config.UPDATE_CHECK_INTERVAL_SECONDS:
+                last_update_check = now
+                await _check_and_apply_update(client)  # điểm an toàn: đã hết chu kỳ, chưa sleep
+
             await asyncio.sleep(loop_delay)
     finally:
         await client.aclose()

@@ -21,11 +21,14 @@ pip install -r requirements.txt
      (`const.py` cũ, biến `user_pool_id`/`client_id`) hoặc tự tra lại nếu tài
      khoản đổi.
    - `GOOGLE_SERVICE_ACCOUNT_JSON`: dán nguyên văn nội dung 1 file service
-     account `.json` (đã share quyền Editor vào mọi sheet cần đọc/ghi — sheet
-     cấu hình chính + mọi sheet MIN/MAX/STOCK1/STOCK2/blacklist mà các dòng
-     sản phẩm tham chiếu tới).
+     account `.json` (đã share quyền Editor vào sheet cấu hình chính; nếu
+     dùng Price Min từ sheet khác — xem mục "Price Min từ sheet khác" bên
+     dưới — cũng phải share quyền Viewer cho đúng email này vào TỪNG sheet
+     ngoài đó).
    - `SHEET_CONFIG_ID`/`CONFIG_RANGE`: giữ nguyên từ bản gốc (`config.ini`
      cũ, mục `[Sheets]`) nếu muốn dùng lại đúng sheet đang có.
+   - `GIT_BRANCH`/`UPDATE_CHECK_INTERVAL_SECONDS`: xem mục "Tự cập nhật từ
+     GitHub" bên dưới — có giá trị mặc định hợp lý, thường không cần sửa.
 
 ## Chạy
 
@@ -58,15 +61,56 @@ pip install pytest pytest-asyncio
 pytest tests/ -v
 ```
 
-## Cấu trúc cột sheet (schema PHẲNG — 21 cột)
+## Price Min từ sheet khác (không dùng IMPORTRANGE)
 
-Không còn tham chiếu chéo sang sheet khác (khác thiết kế ban đầu của bản gốc)
-— mọi giá trị nằm THẲNG trong dòng sản phẩm, giống style tool G2G Repricer
-sibling. Định nghĩa DUY NHẤT nằm trong `sheet_schema.py` (tên cột nội bộ +
-nhãn hiển thị tiếng Anh ngắn gọn ở dòng 1 + chú thích chi tiết gắn vào từng ô
-header — nhân viên rê chuột vào ô header trên Google Sheets sẽ thấy giải
-thích đầy đủ). Chạy `python scripts/setup_sheet_headers.py` để tự động thiết
-lập đúng 21 cột này cho 1 tab mới — script sẽ:
+Nếu Price Min thật sự nằm ở 1 Google Sheet KHÁC (không phải sheet cấu hình
+chính), điền 3 cột `Link Sheet` / `Name Sheet` / `Cell Min` ở cuối bảng cho
+dòng đó — tool sẽ tự đọc TRỰC TIẾP qua Google Sheets API (không phải công
+thức `IMPORTRANGE`, nên không bị delay/lag). Để trống cả 3 cột này thì hành
+vi y hệt như trước: dùng thẳng cột `Price Min` tại chỗ.
+
+- `Link Sheet`: URL đầy đủ của sheet khác đó.
+- `Name Sheet`: tên tab (sheet name) chứa Price Min bên trong file đó.
+- `Cell Min`: ô chứa giá, vd `B5`.
+
+**Bắt buộc:** sheet ngoài đó phải được **share quyền Viewer** cho đúng email
+service account đang dùng (`GOOGLE_SERVICE_ACCOUNT_JSON`), nếu không tool sẽ
+không đọc được.
+
+Tool gom đọc **1 lần cho cả chu kỳ** (không đọc riêng từng dòng) để tránh
+tốn quota. Nếu đọc lỗi (chưa share quyền, sai tên tab, sai ô...), tool tự
+**fallback về giá trị cột `Price Min` tại chỗ** (nếu có) để dòng không bị
+treo hoàn toàn, đồng thời ghi cảnh báo rõ ràng vào `Status` để biết mà sửa.
+
+## Tự cập nhật từ GitHub
+
+Sau mỗi chu kỳ chạy (điểm an toàn — không có sản phẩm nào đang xử lý dở), tool
+tự `git fetch` kiểm tra nhánh `GIT_BRANCH` (mặc định `master`) trên remote
+`origin`; nếu có commit mới, tool tự `git pull --ff-only` rồi tự khởi động
+lại process để dùng ngay code mới — không cần tắt/mở tay. Tần suất kiểm tra
+theo `UPDATE_CHECK_INTERVAL_SECONDS` (mặc định 300s = 5 phút), không kiểm
+tra mỗi chu kỳ để đỡ tốn lệnh `git fetch`.
+
+Không cần điền `GITHUB_TOKEN` gì trong `.env` — tool dùng lại chính git
+credential đã cache sẵn trên máy (từ lần `git push` thủ công đầu tiên lên
+repo GitHub, xem `updater.py`). Nếu `git pull` thất bại (vd có thay đổi cục
+bộ chưa commit, mất mạng, lịch sử đã phân nhánh...), tool chỉ log lỗi và thử
+lại ở chu kỳ kiểm tra sau, KHÔNG bao giờ tự restart khi chưa chắc code mới
+đã pull thành công trọn vẹn (dùng `--ff-only`, không bao giờ tự tạo merge
+commit hay đè conflict âm thầm).
+
+## Cấu trúc cột sheet (schema PHẲNG — 24 cột)
+
+Không còn tham chiếu chéo tràn lan sang sheet khác như thiết kế ban đầu của
+bản gốc — mọi giá trị nằm THẲNG trong dòng sản phẩm (ngoại lệ duy nhất: 3
+cột `Link Sheet`/`Name Sheet`/`Cell Min` để đọc riêng Price Min từ sheet
+khác qua Sheets API, xem mục "Price Min từ sheet khác" bên trên — vẫn CHỦ
+ĐỘNG điền mới kích hoạt, khác cơ chế tham chiếu chéo toàn diện đã bỏ). Định
+nghĩa DUY NHẤT nằm trong `sheet_schema.py` (tên cột nội bộ + nhãn hiển thị
+tiếng Anh ngắn gọn ở dòng 1 + chú thích chi tiết gắn vào từng ô header —
+nhân viên rê chuột vào ô header trên Google Sheets sẽ thấy giải thích đầy
+đủ). Chạy `python scripts/setup_sheet_headers.py` để tự động thiết lập đúng
+24 cột này cho 1 tab mới — script sẽ:
 1. XOÁ SẠCH dữ liệu cũ trong tab (chỉ chạy khi chắc chắn muốn reset),
 2. Ghi nhãn + chú thích cho dòng 1,
 3. Đặt **checkbox thật** (Data Validation kiểu BOOLEAN) cho cột `Enabled`
@@ -85,7 +129,9 @@ bật/tắt dòng), `Name`, 3 cột tool tự ghi (`Status`/`Updated At`/`New Li
 `Discount`/`Round Decimals`/`Always Undercut` (checkbox), `Min Purchase
 Base`/`Min Purchase Step`, 3 cột lọc đối thủ (`Min Competitor Stock`, `Min
 Competitor Ratings`, `Min Feedback %`), `Seller Blacklist`, `Allow
-Recreate on Rate Limit` (checkbox), và `Relax (seconds)`.
+Recreate on Rate Limit` (checkbox), `Relax (seconds)`, và 3 cột `Link
+Sheet`/`Name Sheet`/`Cell Min` (đọc Price Min từ sheet khác, để trống nếu
+không cần).
 
 **Lưu ý về `Relax (seconds)`:** đây là cấu hình cho CẢ VÒNG CHẠY (nghỉ sau
 khi xong HẾT sản phẩm đang bật), không phải riêng 1 sản phẩm — nếu nhiều
@@ -107,11 +153,17 @@ eldorado_repricer_project.md để biết đúng commit/thời điểm).
 
 - **Bỏ hẳn G2G/FunPay** — chỉ còn so giá với đối thủ khác trên chính
   Eldorado.
-- **Bỏ HWID/license gate, tự update GitHub, báo Discord** — chỉ còn ý nghĩa
-  khi phân phối cho người khác dùng.
-- **Bỏ hẳn cơ chế tham chiếu chéo sheet khác** (IDSHEET/SHEET/CELL của bản
-  gốc) — mọi giá trị (STOCK/PRICE_MIN/PRICE_MAX...) nhập thẳng trong dòng sản
-  phẩm, đơn giản hơn nhiều và không cần đọc thêm sheet nào khác nữa.
+- **Bỏ HWID/license gate, báo Discord** — chỉ còn ý nghĩa khi phân phối cho
+  người khác dùng. **Tự update GitHub thì đã thêm lại** (khác cách làm bản
+  gốc: dùng `git pull --ff-only` + tự restart thay vì tải/thay thế file
+  `.exe` — xem mục "Tự cập nhật từ GitHub" bên trên) vì tool giờ chạy như
+  script Python, không phải file `.exe` đóng gói phân phối.
+- **Bỏ cơ chế tham chiếu chéo TOÀN DIỆN sang sheet khác** (IDSHEET/SHEET/CELL
+  áp dụng cho MỌI cột của bản gốc) — mọi giá trị (STOCK/PRICE_MAX...) nhập
+  thẳng trong dòng sản phẩm. **Ngoại lệ đã thêm lại sau đó:** riêng Price Min
+  có thể đọc từ sheet khác qua 3 cột `Link Sheet`/`Name Sheet`/`Cell Min`
+  (xem mục "Price Min từ sheet khác" bên trên) — đọc thẳng qua Sheets API,
+  không phải qua `IMPORTRANGE` như cách làm tay trước đó, nên không bị lag.
 - **`asyncio` thay `ThreadPoolExecutor`** + **1 Service Account duy nhất**
   (không xoay vòng nhiều SA theo thread) — vì đã bỏ tham chiếu chéo nên áp
   lực quota Sheets cũng giảm hẳn, không cần nhiều SA nữa.
