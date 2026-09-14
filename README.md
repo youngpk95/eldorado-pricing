@@ -20,11 +20,15 @@ pip install -r requirements.txt
    - `ELDORADO_COGNITO_POOL_ID`/`ELDORADO_COGNITO_CLIENT_ID`: lấy từ bản gốc
      (`const.py` cũ, biến `user_pool_id`/`client_id`) hoặc tự tra lại nếu tài
      khoản đổi.
-   - `GOOGLE_SERVICE_ACCOUNT_JSON`: dán nguyên văn nội dung 1 file service
-     account `.json` (đã share quyền Editor vào sheet cấu hình chính; nếu
-     dùng Price Min từ sheet khác — xem mục "Price Min từ sheet khác" bên
-     dưới — cũng phải share quyền Viewer cho đúng email này vào TỪNG sheet
-     ngoài đó).
+   - **Service account:** bỏ NGUYÊN VĂN file `.json` tải từ Google Cloud
+     Console vào folder `service_account/` (giữ nguyên tên file, không cần
+     sửa/convert gì) — xem `service_account/README.txt`. Không cần điền gì
+     vào `.env` cho bước này (`GOOGLE_SERVICE_ACCOUNT_JSON` chỉ dùng nếu
+     thật sự muốn cách cũ: dán JSON thành 1 dòng hoặc ghi đường dẫn file).
+     Service account phải có quyền Editor vào sheet cấu hình chính; nếu dùng
+     Price Min từ sheet khác — xem mục "Price Min từ sheet khác" bên dưới —
+     cũng phải share quyền Viewer cho đúng email service account vào TỪNG
+     sheet ngoài đó.
    - `SHEET_CONFIG_ID`/`CONFIG_RANGE`: giữ nguyên từ bản gốc (`config.ini`
      cũ, mục `[Sheets]`) nếu muốn dùng lại đúng sheet đang có.
    - `GIT_BRANCH`/`UPDATE_CHECK_INTERVAL_SECONDS`: xem mục "Tự cập nhật từ
