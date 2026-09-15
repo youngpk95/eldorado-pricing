@@ -294,12 +294,15 @@ def filter_competitors(
     min_feedback: float | None,
     tile_feedback: float | None,
     floor_price: Decimal | None,
+    exclude_keywords: set[str] = frozenset(),
+    require_keywords: set[str] = frozenset(),
 ) -> tuple[list[CompetitorMatch], list[CompetitorMatch]]:
     """Trả về (đối thủ đạt điều kiện để tính giá, đối thủ giá THẤP HƠN giá
     sàn — chỉ để cảnh báo, không dùng để tính giá) — port từ vòng lặp trong
-    Eldorado.list_eldo. Đã bỏ lọc theo thời gian giao hàng + từ khoá tiêu đề
-    (không dùng tới, theo yêu cầu user 2026-09-13 — xem
-    eldorado_repricer_project.md nếu cần thêm lại)."""
+    Eldorado.list_eldo. Đã bỏ lọc theo thời gian giao hàng (không dùng tới,
+    theo yêu cầu user 2026-09-13 — xem eldorado_repricer_project.md nếu cần
+    thêm lại). Lọc theo từ khoá tiêu đề (exclude_keywords/require_keywords)
+    đã được thêm lại theo yêu cầu 2026-09-15."""
     qualifying: list[CompetitorMatch] = []
     below_floor: list[CompetitorMatch] = []
 
@@ -314,6 +317,9 @@ def filter_competitors(
             user_order_info = item.get("userOrderInfo") or {}
             rating = float(user_order_info.get("ratingCount", 0))
             feedback = round(float(user_order_info.get("feedbackScore", 0)), 0)
+            title = (offer.get("offerTitle") or "").lower()
+            has_excluded = any(k in title for k in exclude_keywords)
+            has_required = not require_keywords or any(k in title for k in require_keywords)
 
             is_match = (
                 (not min_stock or qty >= min_stock)
@@ -321,6 +327,8 @@ def filter_competitors(
                 and (not tile_feedback or feedback >= tile_feedback)
                 and (seller not in blacklist)
                 and (floor_price is None or price >= floor_price)
+                and not has_excluded
+                and has_required
             )
             if is_match:
                 qualifying.append(CompetitorMatch(seller=seller, price=price))

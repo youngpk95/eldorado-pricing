@@ -560,3 +560,19 @@ def test_row_config_price_min_none_when_external_unresolved_and_no_local_fallbac
     assert cfg.price_min is None
     assert cfg.external_price_min_warning is not None
     assert "trống" in cfg.external_price_min_warning
+
+
+def test_row_config_title_keyword_filters_parsed_lowercase_and_split_by_semicolon():
+    row = make_row(TITLE_EXCLUDE_KEYWORDS=" Bot ; Farm", TITLE_REQUIRE_KEYWORDS="Gold")
+    cfg = RowConfig(row)
+
+    assert cfg.title_exclude_keywords == {"bot", "farm"}
+    assert cfg.title_require_keywords == {"gold"}
+
+
+def test_row_config_title_keyword_filters_empty_by_default():
+    row = make_row()
+    cfg = RowConfig(row)
+
+    assert cfg.title_exclude_keywords == set()
+    assert cfg.title_require_keywords == set()

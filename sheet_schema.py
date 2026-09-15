@@ -36,6 +36,8 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("COMPETITOR_MIN_RATING_COUNT", "Min Competitor Ratings", "Bỏ qua đối thủ có ít lượt đánh giá hơn số này — để trống nếu không lọc."),
     ("COMPETITOR_MIN_FEEDBACK_PERCENT", "Min Feedback %", "Bỏ qua đối thủ có % feedback thấp hơn số này — để trống nếu không lọc."),
     ("SELLER_BLACKLIST", "Seller Blacklist", "Tên seller luôn bị loại khỏi so sánh (cách nhau bằng dấu ;). Tool tự động loại thêm 'CNLTeam' dù không ghi ở đây."),
+    ("TITLE_EXCLUDE_KEYWORDS", "Exclude Keywords", "Loại đối thủ có tiêu đề offer chứa BẤT KỲ từ khoá nào ở đây (cách nhau bằng dấu ;, không phân biệt hoa/thường). Để trống nếu không lọc."),
+    ("TITLE_REQUIRE_KEYWORDS", "Require Keywords", "Chỉ giữ đối thủ có tiêu đề offer chứa ÍT NHẤT 1 từ khoá ở đây (cách nhau bằng dấu ;, không phân biệt hoa/thường). Để trống = không bắt buộc, giữ hết."),
     ("ALLOW_RECREATE_ON_RATE_LIMIT", "Allow Recreate on Rate Limit", "Tích: cho phép tool tự xoá + tạo lại offer khi Eldorado báo lỗi quá tải (429), VÀ tự tạo lại offer (từ dữ liệu backup) khi phát hiện offer đã bị xoá mất (404) — tự cập nhật luôn My Listing URL sang offer mới. Bỏ tích: tool chỉ báo lỗi ở Status, không tự xoá/tạo/tạo lại gì cả."),
     ("RELAX_SECONDS", "Relax (seconds)", "Số giây NGHỈ sau khi chạy xong HẾT TẤT CẢ sản phẩm đang bật, trước khi bắt đầu vòng chạy tiếp theo — đây là cấu hình cho CẢ VÒNG CHẠY, không phải riêng sản phẩm này. Nếu nhiều sản phẩm đang bật có số khác nhau, tool lấy số LỚN NHẤT. Để trống = dùng mặc định trong .env (LOOP_DELAY_SECONDS)."),
 ]

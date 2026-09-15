@@ -47,6 +47,15 @@ def _is_checked(value: str) -> bool:
     return (value or "").strip().upper() in ("TRUE", "1")
 
 
+def _to_set(value: str, lower: bool = False) -> set[str]:
+    """Dùng chung cho mọi cột kiểu 'danh sách cách nhau bằng ;' (Seller
+    Blacklist, Exclude/Require Keywords)."""
+    items = (value or "").split(";")
+    if lower:
+        return {i.strip().lower() for i in items if i.strip()}
+    return {i.strip() for i in items if i.strip()}
+
+
 @dataclass
 class RowConfig:
     """Đọc + gõ kiểu mọi cột cần dùng của 1 dòng sheet — schema PHẲNG, mọi
@@ -228,8 +237,15 @@ class RowConfig:
 
     @property
     def seller_blacklist(self) -> set[str]:
-        names = {n.strip() for n in self.row.get("SELLER_BLACKLIST").split(";") if n.strip()}
-        return names | {"CNLTeam"}  # luôn tự loại chính mình khỏi danh sách đối thủ
+        return _to_set(self.row.get("SELLER_BLACKLIST")) | {"CNLTeam"}  # luôn tự loại chính mình khỏi danh sách đối thủ
+
+    @property
+    def title_exclude_keywords(self) -> set[str]:
+        return _to_set(self.row.get("TITLE_EXCLUDE_KEYWORDS"), lower=True)
+
+    @property
+    def title_require_keywords(self) -> set[str]:
+        return _to_set(self.row.get("TITLE_REQUIRE_KEYWORDS"), lower=True)
 
     @property
     def create_new_enabled(self) -> bool:
@@ -281,6 +297,8 @@ async def _compute_target(
         min_feedback=cfg.competitor_min_rating_count,
         tile_feedback=cfg.competitor_min_feedback_percent,
         floor_price=cfg.price_min,
+        exclude_keywords=cfg.title_exclude_keywords,
+        require_keywords=cfg.title_require_keywords,
     )
     cheapest = eldo.pick_cheapest(qualifying)
 

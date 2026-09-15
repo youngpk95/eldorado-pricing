@@ -148,8 +148,9 @@ bật/tắt dòng), `Name`, 3 cột tool tự ghi (`Status`/`Updated At`/`New Li
 `My Listing URL`/`Compare URL`, `Stock`, `Price Min`/`Price Max`,
 `Discount`/`Round Decimals`/`Always Undercut` (checkbox), `Min Purchase
 Base`/`Min Purchase Step`, 3 cột lọc đối thủ (`Min Competitor Stock`, `Min
-Competitor Ratings`, `Min Feedback %`), `Seller Blacklist`, `Allow
-Recreate on Rate Limit` (checkbox), `Relax (seconds)`, và 4 cột `Link
+Competitor Ratings`, `Min Feedback %`), `Seller Blacklist`, `Exclude
+Keywords`/`Require Keywords` (lọc đối thủ theo từ khoá trong tiêu đề offer),
+`Allow Recreate on Rate Limit` (checkbox), `Relax (seconds)`, và 4 cột `Link
 Sheet`/`Name Sheet`/`Cell Min`/`Cell Max` (đọc Price Min/Price Max từ sheet
 khác, để trống nếu không cần).
 
@@ -160,14 +161,15 @@ sản phẩm đang bật có số khác nhau, tool tự lấy số LỚN NHẤT
 `LOOP_DELAY_SECONDS` trong `.env`.
 
 **Đã bỏ (theo yêu cầu 2026-09-13, không dùng tới hiện tại):** lọc đối thủ
-theo thời gian giao hàng (`Max Guaranteed/Average Delivery`), lọc theo từ
-khoá tiêu đề (`Exclude/Require Keywords`), và toàn bộ logic tự đổi thời
-gian giao hàng theo tồn kho (`Stock Limit`, `Delivery (In Stock)`/`Delivery
-(Out of Stock)`). Cả cột sheet lẫn code liên quan (`filter_competitors`'s
-guaranteed_time/average_time/keys_exclude/keys_include params,
+theo thời gian giao hàng (`Max Guaranteed/Average Delivery`), và toàn bộ
+logic tự đổi thời gian giao hàng theo tồn kho (`Stock Limit`, `Delivery (In
+Stock)`/`Delivery (Out of Stock)`). Cả cột sheet lẫn code liên quan
+(`filter_competitors`'s guaranteed_time/average_time params,
 `pricing.decide_stock_and_delivery`, `models.StockDecision`) đã bị xoá khỏi
 code hiện tại — cần lại thì khôi phục từ lịch sử git (xem
-eldorado_repricer_project.md để biết đúng commit/thời điểm).
+eldorado_repricer_project.md để biết đúng commit/thời điểm). Lọc theo từ
+khoá tiêu đề (`Exclude/Require Keywords`) đã được **thêm lại** ngày
+2026-09-15 — xem cột `Exclude Keywords`/`Require Keywords` ở trên.
 
 ## Khác gì so với bản gốc (`C:\Users\Admin\Downloads\src`)
 
