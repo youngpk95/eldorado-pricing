@@ -18,6 +18,7 @@ def test_no_competitor_no_floor_keeps_truncated_current_price():
         price_max=None,
         undercut_from_competitor=True,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price == Decimal("12.34")
 
@@ -31,6 +32,7 @@ def test_no_competitor_falls_back_to_max_sheet():
         price_max=Decimal("9.99"),
         undercut_from_competitor=True,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price == Decimal("9.99")
 
@@ -44,6 +46,7 @@ def test_option_false_keeps_own_price_when_already_cheaper():
         price_max=Decimal("999"),
         undercut_from_competitor=False,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price == Decimal("10")
 
@@ -57,6 +60,7 @@ def test_option_true_undercuts_even_when_already_cheaper():
         price_max=Decimal("999"),
         undercut_from_competitor=True,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price == Decimal("11.5")
 
@@ -70,6 +74,7 @@ def test_undercuts_when_competitor_is_cheaper_regardless_of_option():
         price_max=Decimal("999"),
         undercut_from_competitor=False,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price == Decimal("11.5")
 
@@ -83,6 +88,7 @@ def test_never_undercuts_below_floor():
         price_max=Decimal("999"),
         undercut_from_competitor=True,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price == Decimal("10")
 
@@ -100,6 +106,7 @@ def test_always_truncates_down_never_rounds_up():
         price_max=Decimal("999"),
         undercut_from_competitor=True,
         round_decimals=1,
+        offer_type="Item",
     )
     assert price_1_decimal == Decimal("113.9")
 
@@ -111,6 +118,7 @@ def test_always_truncates_down_never_rounds_up():
         price_max=Decimal("999"),
         undercut_from_competitor=True,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price_2_decimals == Decimal("113.97")
 
@@ -124,6 +132,7 @@ def test_clamps_to_max_sheet():
         price_max=Decimal("1.5"),
         undercut_from_competitor=True,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price == Decimal("1.5")
 
@@ -140,8 +149,42 @@ def test_price_max_with_too_many_decimals_gets_truncated_to_eldorado_limit():
         price_max=Decimal("15.5184"),
         undercut_from_competitor=True,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price == Decimal("15.51")
+
+
+def test_currency_keeps_old_decimal_logic_not_truncated_to_two():
+    """Currency/TopUp/GiftCard KHÔNG áp rule 2-vs-5-theo-ngưỡng-0.01 (rule đó
+    chỉ đúng cho Item, xác nhận từ người dùng 2026-09-16) — giữ nguyên
+    ROUND_DECIMALS của sheet, tối đa 6 số thập phân."""
+    price = calculate_new_price(
+        current_price=Decimal("100"),
+        min_competitor_price=Decimal("35.9"),
+        discount_amount=Decimal("0.01"),
+        price_min=Decimal("1"),
+        price_max=Decimal("15.5184"),
+        undercut_from_competitor=True,
+        round_decimals=6,
+        offer_type="Currency",
+    )
+    assert price == Decimal("15.5184")
+
+
+def test_currency_still_capped_at_six_decimals_max():
+    """Ngay cả Currency cũng phải chốt an toàn tối đa 6 số thập phân (hành vi
+    CŨ trước commit d8c4cc7) để không gửi giá >6 số thập phân lên Eldorado."""
+    price = calculate_new_price(
+        current_price=Decimal("100"),
+        min_competitor_price=None,
+        discount_amount=Decimal("0"),
+        price_min=None,
+        price_max=Decimal("0.123456789"),
+        undercut_from_competitor=True,
+        round_decimals=6,
+        offer_type="TopUp",
+    )
+    assert price == Decimal("0.123456")
 
 
 def test_price_below_one_cent_allows_up_to_5_decimals():
@@ -153,6 +196,7 @@ def test_price_below_one_cent_allows_up_to_5_decimals():
         price_max=Decimal("0.0056789"),
         undercut_from_competitor=True,
         round_decimals=2,
+        offer_type="Item",
     )
     assert price == Decimal("0.00567")
 

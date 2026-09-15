@@ -26,10 +26,19 @@ def _truncate(value: Decimal, decimals: int) -> Decimal:
 
 
 def _max_decimals_allowed_by_eldorado(price: Decimal) -> int:
-    """Giới hạn thật của Eldorado (khác với ROUND_DECIMALS người dùng tự
-    chọn) — xác nhận từ lỗi 400 thật của API: 'Prices of 0.01 or higher allow
-    up to 2 decimal places, prices below 0.01 allow up to 5'."""
+    """Giới hạn thật của Eldorado cho offer loại Item (khác với ROUND_DECIMALS
+    người dùng tự chọn) — xác nhận từ lỗi 400 thật của API và người dùng tự
+    kiểm tra lại trên Eldorado 2026-09-16: 'giá >= 0.01 chỉ được tối đa 2 số
+    thập phân, giá < 0.01 được tối đa 5 số'. KHÔNG áp dụng cho Currency/TopUp/
+    GiftCard — xem _OLD_DECIMAL_LOGIC_TYPES."""
     return 2 if price >= Decimal("0.01") else 5
+
+
+# Currency/TopUp/GiftCard giữ nguyên logic số thập phân CŨ (trước commit
+# d8c4cc7): chỉ cắt theo ROUND_DECIMALS của sheet, tối đa 6 số — rule
+# 2-vs-5-theo-ngưỡng-0.01 ở trên chỉ đúng cho Item (xác nhận từ người dùng
+# 2026-09-16, sau khi kiểm tra thực tế trên Eldorado).
+_OLD_DECIMAL_LOGIC_TYPES = {"Currency", "TopUp", "GiftCard"}
 
 
 def calculate_new_price(
@@ -40,6 +49,7 @@ def calculate_new_price(
     price_max: Decimal | None,
     undercut_from_competitor: bool,
     round_decimals: int,
+    offer_type: str = "",
 ) -> Decimal:
     """undercut_from_competitor tương ứng ALWAYS_UNDERCUT=='1' trên sheet:
     True = luôn trừ discount_amount từ giá đối thủ; False = khi giá mình
@@ -70,6 +80,8 @@ def calculate_new_price(
     # có thể mang nhiều số thập phân hơn API cho phép — nếu không cắt lại ở
     # đây, nhánh new_price = price_min/max_sheet phía trên có thể gửi thẳng
     # giá đó lên Eldorado và bị từ chối (lỗi 400 "too many decimal places").
+    if offer_type in _OLD_DECIMAL_LOGIC_TYPES:
+        return _truncate(final_price, min(6, round_decimals))
     return _truncate(final_price, _max_decimals_allowed_by_eldorado(final_price))
 
 

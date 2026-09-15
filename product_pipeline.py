@@ -310,6 +310,7 @@ async def _compute_target(
         price_max=cfg.price_max,
         undercut_from_competitor=cfg.always_undercut,
         round_decimals=cfg.round_decimals,
+        offer_type=offer.offer_type or offer.category,
     )
 
     new_stock = cfg.stock
