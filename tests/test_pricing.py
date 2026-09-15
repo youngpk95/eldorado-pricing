@@ -128,6 +128,35 @@ def test_clamps_to_max_sheet():
     assert price == Decimal("1.5")
 
 
+def test_price_max_with_too_many_decimals_gets_truncated_to_eldorado_limit():
+    """Bug thật gặp 2026-09-15: Price Max đọc từ sheet ngoài trả về
+    15.5184 (4 số thập phân) và bị gửi thẳng lên Eldorado, API từ chối
+    (400 'too many decimal places' — chỉ cho tối đa 2 số khi giá >= 0.01)."""
+    price = calculate_new_price(
+        current_price=Decimal("100"),
+        min_competitor_price=Decimal("35.9"),
+        discount_amount=Decimal("0.01"),
+        price_min=Decimal("1"),
+        price_max=Decimal("15.5184"),
+        undercut_from_competitor=True,
+        round_decimals=2,
+    )
+    assert price == Decimal("15.51")
+
+
+def test_price_below_one_cent_allows_up_to_5_decimals():
+    price = calculate_new_price(
+        current_price=Decimal("1"),
+        min_competitor_price=None,
+        discount_amount=Decimal("0"),
+        price_min=None,
+        price_max=Decimal("0.0056789"),
+        undercut_from_competitor=True,
+        round_decimals=2,
+    )
+    assert price == Decimal("0.00567")
+
+
 def test_find_min_quantity_worked_examples():
     # Cùng công thức find_z đã dùng ở tool gốc, đối chiếu với ví dụ đã biết
     # đúng từ tool sibling (G2G repricer, cùng logic toán học).

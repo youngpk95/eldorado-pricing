@@ -20,9 +20,16 @@ MAX_DECIMAL = Decimal("1E999")  # tương đương "không giới hạn", thay c
 
 
 def _truncate(value: Decimal, decimals: int) -> Decimal:
-    decimals = min(6, max(0, decimals))  # Eldorado chỉ nhận tối đa 6 số thập phân
+    decimals = max(0, decimals)
     quantum = Decimal(1).scaleb(-decimals)
     return value.quantize(quantum, rounding=ROUND_DOWN)
+
+
+def _max_decimals_allowed_by_eldorado(price: Decimal) -> int:
+    """Giới hạn thật của Eldorado (khác với ROUND_DECIMALS người dùng tự
+    chọn) — xác nhận từ lỗi 400 thật của API: 'Prices of 0.01 or higher allow
+    up to 2 decimal places, prices below 0.01 allow up to 5'."""
+    return 2 if price >= Decimal("0.01") else 5
 
 
 def calculate_new_price(
@@ -58,7 +65,12 @@ def calculate_new_price(
         else:
             new_price = _truncate(current_price, round_decimals)
 
-    return min(new_price, max_sheet)
+    final_price = min(new_price, max_sheet)
+    # Chốt an toàn: PRICE_MIN/PRICE_MAX đọc thẳng từ sheet (hoặc sheet ngoài)
+    # có thể mang nhiều số thập phân hơn API cho phép — nếu không cắt lại ở
+    # đây, nhánh new_price = price_min/max_sheet phía trên có thể gửi thẳng
+    # giá đó lên Eldorado và bị từ chối (lỗi 400 "too many decimal places").
+    return _truncate(final_price, _max_decimals_allowed_by_eldorado(final_price))
 
 
 def find_min_quantity(total_order_min: Decimal, price: Decimal, round_coef: Decimal) -> int:
