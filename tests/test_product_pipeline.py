@@ -20,10 +20,10 @@ from product_pipeline import RowConfig, process_product  # noqa: E402
 
 class FakeSheets:
     def __init__(self):
-        self.writes: list[tuple[int, str, str | None]] = []
+        self.writes: list[tuple[int, str, str | None, str]] = []
 
-    def write_result(self, index: int, note: str, link: str | None) -> None:
-        self.writes.append((index, note, link))
+    def write_result(self, index: int, note: str, link: str | None, expected_own_url: str) -> None:
+        self.writes.append((index, note, link, expected_own_url))
 
 
 def make_own_offer(price="120", quantity=200, min_quantity=1) -> OwnOffer:
@@ -91,7 +91,7 @@ async def test_process_product_undercuts_cheapest_qualifying_competitor(monkeypa
     await process_product(row, sheets, client)
 
     assert len(sheets.writes) == 1
-    index, note, link = sheets.writes[0]
+    index, note, link, _ = sheets.writes[0]
     assert index == 0
     assert link is None  # DRY_RUN=True -> không tạo offer mới
     assert "[DRY RUN]" in note
@@ -133,7 +133,7 @@ async def test_process_product_floor_none_disables_floor_filtering_entirely(monk
     sheets = FakeSheets()
     await process_product(row, sheets, client)
 
-    _, note, _ = sheets.writes[0]
+    _, note, _, _ = sheets.writes[0]
     assert "Đối thủ rẻ nhất hợp lệ: TooCheap" in note
 
 
@@ -162,7 +162,7 @@ async def test_process_product_reports_error_when_enabled_but_missing_url(monkey
     await process_product(row, sheets, client)
 
     assert len(sheets.writes) == 1
-    _, note, link = sheets.writes[0]
+    _, note, link, _ = sheets.writes[0]
     assert "thiếu" in note.lower()
     assert link is None
     client.get_own_offer.assert_not_called()
@@ -211,7 +211,7 @@ async def test_process_product_no_change_when_price_already_optimal(monkeypatch)
     await process_product(row, sheets, client)
 
     assert len(sheets.writes) == 1
-    _, note, link = sheets.writes[0]
+    _, note, link, _ = sheets.writes[0]
     assert "Không có thay đổi" in note
     assert link is None
 
@@ -238,7 +238,7 @@ async def test_process_product_syncs_stock_quantity(monkeypatch):
     sheets = FakeSheets()
     await process_product(row, sheets, client)
 
-    _, note, _ = sheets.writes[0]
+    _, note, _, _ = sheets.writes[0]
     assert "Stock: 100 -> 5" in note
 
 
@@ -283,7 +283,7 @@ async def test_process_product_recovers_from_snapshot_when_offer_not_found(monke
     await process_product(row, sheets, client)
 
     assert len(sheets.writes) == 1
-    index, note, link = sheets.writes[0]
+    index, note, link, _ = sheets.writes[0]
     assert index == 0
     assert link == "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-offer-id"
     assert "TỰ TẠO LẠI" in note
@@ -325,7 +325,7 @@ async def test_process_product_marks_pending_link_after_429_recreate(monkeypatch
     sheets = FakeSheets()
     await process_product(row, sheets, client)
 
-    _, _, link = sheets.writes[0]
+    _, _, link, _ = sheets.writes[0]
     assert link == "https://www.eldorado.gg/dashboard/offers/Currency/edit/recreated-id"
 
     _, pending_link = offer_cache.load_snapshot(row.index, row.get("OWN_LISTING_URL"))
@@ -353,7 +353,7 @@ async def test_process_product_does_not_recreate_twice_when_pending_link_exists(
 
     client.post.assert_not_called()
     client.delete.assert_not_called()
-    _, note, link = sheets.writes[0]
+    _, note, link, _ = sheets.writes[0]
     assert link == pending
 
 
@@ -368,7 +368,7 @@ async def test_process_product_reports_manual_fix_when_no_snapshot_available(mon
     await process_product(row, sheets, client)
 
     client.post.assert_not_called()
-    _, note, link = sheets.writes[0]
+    _, note, link, _ = sheets.writes[0]
     assert link is None
     assert "tự tạo lại tay" in note.lower()
 
@@ -388,7 +388,7 @@ async def test_process_product_reports_error_when_recreate_disabled(monkeypatch,
     await process_product(row, sheets, client)
 
     client.post.assert_not_called()
-    _, note, link = sheets.writes[0]
+    _, note, link, _ = sheets.writes[0]
     assert link is None
     assert "Allow Recreate" in note
 
@@ -409,7 +409,7 @@ async def test_process_product_dry_run_recovery_skips_real_create(monkeypatch, t
     await process_product(row, sheets, client)
 
     client.post.assert_not_called()
-    _, note, link = sheets.writes[0]
+    _, note, link, _ = sheets.writes[0]
     assert "[DRY RUN]" in note
     assert link is None
 

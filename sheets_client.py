@@ -323,7 +323,96 @@ class SheetsClient:
     WRITE_RESULT_MAX_ATTEMPTS = 3
     WRITE_RESULT_RETRY_DELAY_SECONDS = 2
 
-    def write_result(self, row_index: int, note: str, link: str | None) -> None:
+    def _resolve_sheet_row(self, row_index: int, expected_own_url: str, ownurl_col: str) -> int | None:
+        """Xác minh dòng `row_index` (vị trí chụp từ ĐẦU chu kỳ, xem
+        main.run_one_cycle) vẫn đúng là dòng chứa `expected_own_url` NGAY
+        TRƯỚC KHI GHI — bug thật đã gặp (2026-09-16, "Mageblood Event"):
+        người dùng kéo đổi thứ tự 2 dòng trong lúc chu kỳ đang xử lý (mỗi
+        sản phẩm mất vài giây gọi API Eldorado), khiến row_index đọc từ đầu
+        không còn khớp dòng vật lý hiện tại nữa -> note của sản phẩm A bị
+        ghi nhầm sang dòng của sản phẩm B. Đây là lỗi cùng bản chất với bug
+        cột đã sửa ở 93f4f63, nhưng cho DÒNG thay vì CỘT.
+
+        Dùng OWN_LISTING_URL làm khoá đối chiếu — định danh thật, ổn định
+        của 1 sản phẩm, không đổi khi người dùng kéo đổi thứ tự dòng. Cùng
+        nguyên tắc offer_cache.load_snapshot đã dùng để tránh nhầm snapshot
+        giữa các dòng.
+
+        Nếu OWN_LISTING_URL còn trống (dòng lỗi cấu hình, vd thiếu link) thì
+        không có khoá nào để đối chiếu — chấp nhận dùng thẳng row_index gốc,
+        không cố dò lại (dò theo URL rỗng có thể trúng nhầm 1 dòng trống
+        khác bất kỳ).
+
+        CHỈ đọc đúng 1 lần (toàn bộ cột OWN_LISTING_URL) thay vì đọc 1 ô rồi
+        mới đọc thêm cả cột khi lệch — dùng 1 lần đọc đó để vừa xác minh vừa
+        dò lại nếu cần, tránh tốn thêm 1 API call/lần ghi (mỗi sản phẩm mỗi
+        chu kỳ) vào đúng quota mà cơ chế phục hồi 429 của tool đang cố tránh
+        vượt (xem product_pipeline._recover_missing_offer).
+
+        GIẢ ĐỊNH: OWN_LISTING_URL là duy nhất trên toàn sheet (cùng giả định
+        offer_cache.load_snapshot đã dùng) — nếu 2 dòng lỡ trùng URL (vd copy
+        dòng làm mẫu quên đổi link), dò lại có thể trúng NHẦM dòng kia. Đây
+        là rủi ro cấu hình sai dữ liệu có sẵn từ trước (2 dòng cùng theo dõi
+        1 offer sống đã tự xung đột giá với nhau rồi), không phải lỗi mới do
+        cơ chế dò lại này gây ra thêm.
+
+        Lỗi mạng/API khi đọc (best-effort) KHÔNG được để văng lên (sẽ crash
+        cả asyncio.gather của main.run_one_cycle, huỷ luôn các sản phẩm khác
+        đang xử lý song song) — chỉ log cảnh báo rồi dùng tạm row_index gốc,
+        coi như quay lại hành vi trước khi có fix này (thà rủi ro ghi lệch
+        dòng như cũ còn hơn sập cả chu kỳ vì 1 lần đọc xác minh thất bại).
+
+        Trả về sheet_row đúng (giữ nguyên hoặc đã dò lại), hoặc None nếu
+        không còn tìm thấy dòng nào khớp (dòng bị xoá hẳn / URL bị sửa tay)
+        — bên gọi PHẢI bỏ ghi khi nhận None, thà không ghi còn hơn ghi nhầm
+        sang dòng của sản phẩm khác."""
+        sheet_row = row_index + 2
+        expected = (expected_own_url or "").strip()
+        if not expected:
+            return sheet_row
+
+        try:
+            with self._lock:
+                column = (
+                    self._service.values()
+                    .get(spreadsheetId=config.SHEET_CONFIG_ID, range=f"{config.CONFIG_RANGE}!{ownurl_col}2:{ownurl_col}")
+                    .execute()
+                )
+        except Exception as e:
+            logger.warning(
+                "[sheets] Không đọc được cột OWN_LISTING_URL để xác minh dòng %s trước khi ghi (%s) "
+                "— tạm dùng nguyên row_index gốc, bỏ qua bước xác minh lần này.",
+                sheet_row, e,
+            )
+            return sheet_row
+
+        column_values = column.get("values", [])
+        current_url = (
+            column_values[row_index][0].strip()
+            if row_index < len(column_values) and column_values[row_index]
+            else ""
+        )
+        if current_url == expected:
+            return sheet_row
+
+        logger.info(
+            "[sheets] Dòng %s không còn khớp own_listing_url mong đợi (sheet có thể đã bị đổi thứ tự dòng) "
+            "— dò lại đúng vị trí trước khi ghi.",
+            sheet_row,
+        )
+        for offset, row in enumerate(column_values):
+            value = (row[0].strip() if row else "")
+            if value == expected:
+                new_row = offset + 2
+                logger.info(
+                    "[sheets] Đã dò lại đúng dòng %s (thay vì %s cũ) cho own_listing_url=%s",
+                    new_row, sheet_row, expected,
+                )
+                return new_row
+
+        return None
+
+    def write_result(self, row_index: int, note: str, link: str | None, expected_own_url: str) -> None:
         """Ghi 3 cột kết quả (Status/Updated At/New Link) đúng dòng — giữ
         hành vi ghi NGAY sau mỗi sản phẩm như bản gốc (để thấy tiến độ
         live), không gom hết tới cuối chu kỳ mới ghi 1 lần.
@@ -332,6 +421,11 @@ class SheetsClient:
         hardcode C/D/E/F — bug thật đã gặp (2026-09-14): nhân viên chèn cột
         mới vào giữa bảng làm lệch vị trí, nếu vẫn hardcode chữ cột thì write
         sẽ ghi ĐÈ NHẦM lên dữ liệu cột khác (còn nguy hiểm hơn cả đọc nhầm).
+
+        DÒNG đích cũng được xác minh lại qua `expected_own_url` (xem
+        _resolve_sheet_row) trước khi ghi — không chỉ tin `row_index` chụp từ
+        đầu chu kỳ, vì sheet có thể đã bị đổi thứ tự dòng giữa lúc đọc và lúc
+        ghi (bug thật 2026-09-16).
 
         Khi `link` có giá trị (chỉ xảy ra khi vừa xoá + tạo lại offer do gặp
         429 — xem product_pipeline.py), NGHĨA LÀ offer cũ đã bị xoá thật,
@@ -345,12 +439,21 @@ class SheetsClient:
         sửa tay. Nên giờ retry vài lần trước khi bỏ cuộc; nếu vẫn thất bại và
         có `link` (trường hợp tốn kém nhất), log RÕ link đó ra để còn dán tay
         được, thay vì mất luôn không dấu vết."""
-        sheet_row = row_index + 2  # +1 header, +1 chuyển 0-based -> 1-based
         key_to_index = self._ensure_key_to_index()
         status_col = _column_letter(key_to_index["LAST_STATUS"])
         updated_col = _column_letter(key_to_index["LAST_UPDATED_AT"])
         newlink_col = _column_letter(key_to_index["NEW_OFFER_LINK"])
         ownurl_col = _column_letter(key_to_index["OWN_LISTING_URL"])
+
+        sheet_row = self._resolve_sheet_row(row_index, expected_own_url, ownurl_col)
+        if sheet_row is None:
+            logger.warning(
+                "[sheets] Bỏ ghi kết quả cho own_listing_url=%s: không còn tìm thấy dòng nào khớp trên sheet "
+                "(có thể đã bị xoá hoặc URL bị sửa tay) — thà bỏ ghi còn hơn ghi nhầm sang dòng khác. Note lẽ ra đã ghi: %s",
+                expected_own_url, note,
+            )
+            return
+
         data = [
             {"range": f"{config.CONFIG_RANGE}!{status_col}{sheet_row}", "values": [[note]]},
             {"range": f"{config.CONFIG_RANGE}!{updated_col}{sheet_row}", "values": [[datetime.now().strftime("%d/%m/%Y %H:%M:%S")]]},

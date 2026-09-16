@@ -260,10 +260,14 @@ class RowConfig:
         return _to_int(v, None) if v else None
 
 
-async def _write_result(sheets: SheetsClient, index: int, note: str, link: str | None) -> None:
+async def _write_result(sheets: SheetsClient, index: int, note: str, link: str | None, expected_own_url: str) -> None:
     """SheetsClient dùng googleapiclient đồng bộ — chạy trong thread pool mặc
-    định của asyncio để không chặn event loop trong lúc chờ HTTP."""
-    await asyncio.to_thread(sheets.write_result, index, note, link)
+    định của asyncio để không chặn event loop trong lúc chờ HTTP.
+
+    `expected_own_url` = OWN_LISTING_URL đọc được lúc ĐẦU chu kỳ (từ `row`),
+    dùng để write_result tự xác minh dòng chưa bị đổi thứ tự trước khi ghi
+    (xem sheets_client._resolve_sheet_row) — bug thật đã gặp 2026-09-16."""
+    await asyncio.to_thread(sheets.write_result, index, note, link, expected_own_url)
 
 
 async def _save_snapshot(row_index: int, own_listing_url: str, offer: OwnOffer) -> None:
@@ -360,7 +364,7 @@ async def _recover_missing_offer(
             sheets, row.index,
             "Lỗi: không tìm thấy ID sản phẩm (offer đã bị xoá) — bật 'Allow Recreate on Rate Limit' "
             "để tool tự tạo lại offer mới, hoặc tự tạo lại tay rồi dán link vào My Listing URL.",
-            None,
+            None, cfg.own_listing_url,
         )
         return
 
@@ -370,7 +374,7 @@ async def _recover_missing_offer(
             sheets, row.index,
             "Lỗi: không tìm thấy ID sản phẩm (offer đã bị xoá) và không có dữ liệu backup để tự tạo lại "
             "— cần tự tạo lại tay rồi dán link mới vào My Listing URL.",
-            None,
+            None, cfg.own_listing_url,
         )
         return
 
@@ -380,7 +384,7 @@ async def _recover_missing_offer(
         await _write_result(
             sheets, row.index,
             f"⚠️ Offer đã bị xoá — đã tự tạo lại offer mới trước đó nhưng chưa ghi được vào sheet, đang thử ghi lại: {pending_link}",
-            pending_link,
+            pending_link, cfg.own_listing_url,
         )
         return
 
@@ -388,7 +392,7 @@ async def _recover_missing_offer(
 
     if config.DRY_RUN:
         note_lines.insert(0, "[DRY RUN] Offer đã bị xoá — sẽ tự tạo lại offer mới (chưa làm thật).")
-        await _write_result(sheets, row.index, "\n".join(note_lines), None)
+        await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
         return
 
     new_link, create_status = await writer.recreate_offer_from_snapshot(
@@ -396,14 +400,16 @@ async def _recover_missing_offer(
     )
     if not new_link:
         note_lines.insert(0, f"❌ Offer đã bị xoá, tự tạo lại THẤT BẠI (status {create_status}) — cần tự tạo lại tay.")
-        await _write_result(sheets, row.index, "\n".join(note_lines), None)
+        await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
         return
 
     # Ghi pending TRƯỚC khi thử ghi sheet — nếu tiến trình crash ngay sau
     # đây, link vẫn còn trong cache để lần chạy sau không tạo trùng thêm.
     await _mark_pending_link(row.index, new_link)
     note_lines.insert(0, "✅ Offer đã bị xoá -> đã TỰ TẠO LẠI offer mới thành công, đã cập nhật My Listing URL.")
-    await _write_result(sheets, row.index, "\n".join(note_lines), new_link)
+    # own_listing_url gốc (trước khi bị xoá) vẫn còn đúng dòng vật lý cần ghi
+    # — link MỚI chỉ để cập nhật cột My Listing URL, không dùng để đối chiếu.
+    await _write_result(sheets, row.index, "\n".join(note_lines), new_link, cfg.own_listing_url)
 
 
 async def process_product(row: ProductRow, sheets: SheetsClient, client: EldoradoClient) -> None:
@@ -414,13 +420,13 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
         # Đã tích Enabled nhưng thiếu link bắt buộc — trước đây bị bỏ qua
         # HOÀN TOÀN im lặng (không ghi gì vào Status), khiến staff không
         # biết vì sao dòng không bao giờ chạy. Giờ báo lỗi rõ ràng.
-        await _write_result(sheets, row.index, "Lỗi: đã tích Enabled nhưng thiếu My Listing URL hoặc Compare URL", None)
+        await _write_result(sheets, row.index, "Lỗi: đã tích Enabled nhưng thiếu My Listing URL hoặc Compare URL", None, cfg.own_listing_url)
         return
 
     try:
         offer_id, offer_type = eldo.parse_offer_link(cfg.own_listing_url)
         if not offer_id:
-            await _write_result(sheets, row.index, "Lỗi: không đọc được offer_id từ OWN_LISTING_URL", None)
+            await _write_result(sheets, row.index, "Lỗi: không đọc được offer_id từ OWN_LISTING_URL", None, cfg.own_listing_url)
             return
 
         try:
@@ -438,12 +444,12 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
 
         if not (update_price or update_stock or update_min_qty):
             note_lines.insert(0, "💤 Không có thay đổi.")
-            await _write_result(sheets, row.index, "\n".join(note_lines), None)
+            await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
             return
 
         if config.DRY_RUN:
             note_lines.insert(0, "[DRY RUN] Sẽ cập nhật (chưa ghi thật lên Eldorado).")
-            await _write_result(sheets, row.index, "\n".join(note_lines), None)
+            await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
             return
 
         only_price_changed = update_price and not update_stock and not update_min_qty
@@ -463,11 +469,14 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
             # thiếu bước này thì luồng 404 vẫn có thể tạo offer trùng.
             await _mark_pending_link(row.index, link)
         note_lines.insert(0, ("✅ " if success else "❌ ") + message)
-        await _write_result(sheets, row.index, "\n".join(note_lines), link)
+        # cfg.own_listing_url là URL CŨ đọc từ đầu chu kỳ, vẫn đúng để đối
+        # chiếu dòng vật lý — `link` (nếu có) chỉ dùng để ghi đè cột My
+        # Listing URL sang offer mới, xem write_result.
+        await _write_result(sheets, row.index, "\n".join(note_lines), link, cfg.own_listing_url)
 
     except EldoradoApiError as e:
         logger.error("[%s] Lỗi Eldorado API: %s", cfg.name, e)
-        await _write_result(sheets, row.index, f"Lỗi: {e}", None)
+        await _write_result(sheets, row.index, f"Lỗi: {e}", None, cfg.own_listing_url)
     except Exception as e:
         logger.exception("[%s] Lỗi không mong đợi khi xử lý sản phẩm", cfg.name)
-        await _write_result(sheets, row.index, f"Lỗi không xác định: {e}", None)
+        await _write_result(sheets, row.index, f"Lỗi không xác định: {e}", None, cfg.own_listing_url)

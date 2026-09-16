@@ -164,7 +164,7 @@ def test_write_result_updates_own_listing_url_when_link_given(monkeypatch):
 
     client, fake_service = _make_write_client()
 
-    client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id")
+    client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id", "")
 
     body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
     ranges_written = {d["range"]: d["values"][0][0] for d in body["data"]}
@@ -178,7 +178,7 @@ def test_write_result_does_not_touch_own_listing_url_when_no_link(monkeypatch):
 
     client, fake_service = _make_write_client()
 
-    client.write_result(0, "Không có thay đổi", None)
+    client.write_result(0, "Không có thay đổi", None, "")
 
     body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
     ranges_written = {d["range"] for d in body["data"]}
@@ -204,7 +204,7 @@ def test_write_result_uses_actual_header_position_not_hardcoded_letters(monkeypa
     client.read_config_rows()  # populate cache _key_to_index từ header THẬT ở trên
 
     fake_service = client._service
-    client.write_result(0, "Trạng thái mới", None)
+    client.write_result(0, "Trạng thái mới", None, "")
 
     body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
     ranges_written = {d["range"]: d["values"][0][0] for d in body["data"]}
@@ -228,7 +228,7 @@ def test_write_result_lazily_fetches_header_when_called_without_prior_read(monke
     client._lock = threading.Lock()
     client._key_to_index = None
 
-    client.write_result(0, "Trạng thái mới", None)
+    client.write_result(0, "Trạng thái mới", None, "")
 
     get_call = fake_service.values.return_value.get.call_args
     assert get_call.kwargs["range"] == "Sheet1!1:1"  # chỉ fetch đúng dòng 1, không kéo hết data
@@ -251,7 +251,7 @@ def test_write_result_retries_then_succeeds(monkeypatch):
         None,
     ]
 
-    client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id")
+    client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id", "")
 
     assert fake_service.values.return_value.batchUpdate.return_value.execute.call_count == 3
 
@@ -329,6 +329,107 @@ def test_read_external_cells_error_log_mentions_max_and_cell_ref(caplog):
     assert "Price Max" in log_text
 
 
+def test_write_result_relocates_row_when_sheet_reordered_before_write(monkeypatch):
+    """Test regression cho bug thật đã gặp (2026-09-16, "Mageblood Event"):
+    người dùng đổi thứ tự dòng NGAY TRONG lúc chu kỳ đang xử lý -> row_index
+    chụp từ đầu chu kỳ không còn khớp dòng vật lý hiện tại. write_result
+    phải tự dò lại đúng dòng theo OWN_LISTING_URL trước khi ghi, không được
+    ghi nhầm sang dòng của sản phẩm khác."""
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+
+    client, fake_service = _make_write_client()
+    own_url_col = _column_letter(_default_key_to_index()["OWN_LISTING_URL"])
+    expected_url = "https://www.eldorado.gg/dashboard/offers/Currency/edit/abc123"
+    other_url = "https://www.eldorado.gg/dashboard/offers/Currency/edit/other"
+
+    def fake_get(spreadsheetId, range):
+        assert range == f"Sheet1!{own_url_col}2:{own_url_col}"  # CHỈ 1 lần đọc duy nhất (cả cột)
+        result = MagicMock()
+        # dòng 2 (row_index=0, giờ thuộc sản phẩm KHÁC) -- dòng 3 (đúng sản phẩm cần tìm)
+        result.execute.return_value = {"values": [[other_url], [expected_url]]}
+        return result
+
+    fake_service.values.return_value.get.side_effect = fake_get
+
+    client.write_result(0, "Trạng thái mới", None, expected_url)
+
+    assert fake_service.values.return_value.get.call_count == 1
+    body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
+    ranges_written = {d["range"] for d in body["data"]}
+    assert all(r.endswith("3") for r in ranges_written)  # ghi vào dòng 3 (đã dò lại)
+    assert not any(r.endswith("2") for r in ranges_written)  # KHÔNG ghi nhầm vào dòng 2 cũ
+
+
+def test_write_result_skips_write_when_row_not_found_after_reorder(monkeypatch, caplog):
+    """Nếu sau khi sheet bị đổi thứ tự dòng mà KHÔNG còn tìm thấy dòng nào
+    khớp OWN_LISTING_URL mong đợi (dòng bị xoá hẳn / URL bị sửa tay) — phải
+    BỎ GHI, không được ghi bừa sang dòng khác. Thà mất 1 lần cập nhật note
+    còn hơn ghi đè nhầm dữ liệu của sản phẩm khác."""
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+
+    client, fake_service = _make_write_client()
+    own_url_col = _column_letter(_default_key_to_index()["OWN_LISTING_URL"])
+    expected_url = "https://www.eldorado.gg/dashboard/offers/Currency/edit/abc123"
+    other_url = "https://www.eldorado.gg/dashboard/offers/Currency/edit/other"
+
+    def fake_get(spreadsheetId, range):
+        assert range == f"Sheet1!{own_url_col}2:{own_url_col}"
+        result = MagicMock()
+        result.execute.return_value = {"values": [[other_url]]}
+        return result
+
+    fake_service.values.return_value.get.side_effect = fake_get
+
+    with caplog.at_level("WARNING"):
+        client.write_result(0, "Trạng thái mới", None, expected_url)
+
+    fake_service.values.return_value.batchUpdate.assert_not_called()
+    assert any(expected_url in r.message for r in caplog.records)
+
+
+def test_write_result_falls_back_to_original_row_when_identity_check_fails(monkeypatch, caplog):
+    """Bug do code review bắt được: lỗi mạng/API khi đọc cột OWN_LISTING_URL
+    để xác minh (best-effort) KHÔNG được văng lên trên — nếu không bắt, lỗi
+    này sẽ crash ra khỏi asyncio.gather ở main.run_one_cycle (không dùng
+    return_exceptions=True), huỷ luôn các sản phẩm KHÁC đang xử lý song song
+    chỉ vì 1 lần đọc xác minh thất bại tạm thời. Phải log cảnh báo rồi dùng
+    tạm row_index gốc (quay lại đúng hành vi trước khi có fix xác minh dòng),
+    không được để cả chu kỳ sập."""
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+
+    client, fake_service = _make_write_client()
+    expected_url = "https://www.eldorado.gg/dashboard/offers/Currency/edit/abc123"
+    fake_service.values.return_value.get.side_effect = Exception("mất kết nối")
+
+    with caplog.at_level("WARNING"):
+        client.write_result(0, "Trạng thái mới", None, expected_url)
+
+    body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
+    ranges_written = {d["range"]: d["values"][0][0] for d in body["data"]}
+    assert ranges_written["Sheet1!C2"] == "Trạng thái mới"  # vẫn ghi vào row_index gốc
+
+
+def test_write_result_skips_identity_check_when_expected_url_blank(monkeypatch):
+    """Dòng lỗi cấu hình (thiếu OWN_LISTING_URL) không có khoá nào để đối
+    chiếu — vẫn phải ghi note lỗi vào đúng row_index gốc, không cố dò (dò
+    theo chuỗi rỗng dễ trúng nhầm 1 dòng trống khác bất kỳ) và không tốn
+    thêm lần gọi get()."""
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+
+    client, fake_service = _make_write_client()
+
+    client.write_result(0, "Lỗi: thiếu link", None, "")
+
+    fake_service.values.return_value.get.assert_not_called()
+    body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
+    ranges_written = {d["range"]: d["values"][0][0] for d in body["data"]}
+    assert ranges_written["Sheet1!C2"] == "Lỗi: thiếu link"
+
+
 def test_write_result_logs_link_when_all_retries_fail(monkeypatch, caplog):
     """Nếu ghi thất bại HẾT các lần thử mà có link (vừa tạo lại offer do
     429) — phải log RÕ link đó ra để còn dán tay, không được mất trắng."""
@@ -340,7 +441,7 @@ def test_write_result_logs_link_when_all_retries_fail(monkeypatch, caplog):
     fake_service.values.return_value.batchUpdate.return_value.execute.side_effect = Exception("mất kết nối")
 
     with caplog.at_level("ERROR"):
-        client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id")
+        client.write_result(0, "Đã xoá + tạo lại offer mới", "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id", "")
 
     assert fake_service.values.return_value.batchUpdate.return_value.execute.call_count == SheetsClient.WRITE_RESULT_MAX_ATTEMPTS
     assert any("https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id" in r.message for r in caplog.records)
