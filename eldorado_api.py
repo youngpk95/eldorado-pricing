@@ -60,6 +60,14 @@ def _normalize_offer_type(offer_type: str) -> str:
     return _OFFER_TYPE_ALIASES.get(str(offer_type).strip().lower(), str(offer_type).strip())
 
 
+def resolve_attribute_value_id(value):
+    """`value` của 1 attribute Eldorado trả về có thể là dict {"id": ...}
+    HOẶC scalar (chuỗi/số) thẳng tuỳ game/category — DÙNG CHUNG ở đây
+    (build_compare_url_from_sheet) và writer._build_offer_attributes, tránh
+    2 bản sao dễ lệch nhau nếu Eldorado đổi shape lần nữa (đã từng đổi)."""
+    return value.get("id") if isinstance(value, dict) else value
+
+
 def parse_offer_link(product_url: str) -> tuple[str, str]:
     """Tách offerID + offerType từ link sản phẩm (link dashboard hoặc query
     param) — port từ Eldorado._parse_offer_link."""
@@ -125,7 +133,21 @@ def build_compare_url_from_sheet(
     remap tham số kiểu storefront (te_v/te_vN/attr_ids/attribute_value_id)
     sang tham số API thật (tradeEnvironmentValueN/offerAttributeIdsCsv/...).
     Xem docstring gốc trong eldo.py cho ví dụ cụ thể — logic này encode quirk
-    thật của Eldorado, đã được xác nhận độc lập, không đơn giản hoá."""
+    thật của Eldorado, đã được xác nhận độc lập, không đơn giản hoá.
+
+    QUAN TRỌNG (sửa 2026-09-17, bug thật đã gặp): tradeEnvironmentValueN +
+    attribute (loại Orb/biến thể cụ thể) giờ LUÔN được tự chèn từ chính
+    `trade_environment_values`/`attributes_raw` của OFFER CỦA MÌNH (đọc lúc
+    fetch own offer), KHÔNG còn phụ thuộc việc link Compare URL dán vào sheet
+    có chứa sẵn `te_v`/`attribute_value_id` hay không như trước. Trước đây
+    nếu dán link kiểu `eldorado.gg/<game>/og/<uuid>?position=...` (Eldorado
+    dùng khi chia sẻ thẳng 1 offer cụ thể) — link này KHÔNG mang theo
+    `te_v`/`attribute_value_id` (thông tin lọc bị giấu trong uuid, chỉ trang
+    web tự giải mã được) — filter bị bỏ trống hoàn toàn, kéo về NHẦM mọi biến
+    thể khác trong cùng game/category (vd Mirror of Kalandra bị trộn lẫn với
+    giá Chaos Orb rẻ mạt). Đã xác nhận trực tiếp qua API thật: thêm đúng 2
+    filter này làm kết quả từ hàng chục dòng rác còn lại ĐÚNG 9 dòng, khớp số
+    "Other sellers" trên trang web."""
     parsed = urlparse(sheet_url)
     params = parse_qs(parsed.query, keep_blank_values=True)
 
@@ -139,32 +161,74 @@ def build_compare_url_from_sheet(
 
     detail_attr_key = None
     detail_attr_value_id = None
+    # Chỉ cho phép ĐOÁN attr_key từ 1 đoạn path của URL khi HOÀN TOÀN không
+    # có attribute nào từ own offer (attributes_raw rỗng/None) — KHÔNG áp
+    # dụng khi own offer CÓ trả về 1 attribute nhưng "id" của nó rỗng (response
+    # méo/bất thường). Bug đã bị agent review phát hiện: trước đây id="" vẫn
+    # lọt qua "in first_attr" rồi rơi vào `detail_attr_key or (path fallback)`
+    # y hệt trường hợp thật sự không có gì — đoán bậy 1 đoạn path bất kỳ (vd
+    # tên game) rồi gửi thẳng làm tên tham số lên API thật, thay vì an toàn
+    # hơn là bỏ qua hẳn filter này.
+    attr_key_guessable_from_path = not attributes_raw
     if attributes_raw:
         first_attr = attributes_raw[0]
-        if isinstance(first_attr, dict):
-            detail_attr_key = first_attr.get("id")
-            attr_val = first_attr.get("value")
-            if isinstance(attr_val, dict) and "id" in attr_val:
-                detail_attr_value_id = attr_val["id"]
-
-    has_te_v = any(k == "te_v" or (k.startswith("te_v") and k[4:].isdigit()) for k in params)
+        if isinstance(first_attr, dict) and "id" in first_attr:
+            detail_attr_key = first_attr.get("id") or None
+            detail_attr_value_id = resolve_attribute_value_id(first_attr.get("value"))
 
     renamed: dict[str, list[str]] = {}
+    sheet_te_fallback: dict[int, str] = {}
+    sheet_attr_value_fallback: str | None = None
     for key, values in params.items():
+        # te_v/te_vN/attribute_value_id của URL SHEET không được lọt qua
+        # NGUYÊN TRẠNG nữa — own offer luôn được ưu tiên (xem docstring ở
+        # trên) — nhưng vẫn giữ lại làm FALLBACK (sheet_te_fallback/
+        # sheet_attr_value_fallback) cho trường hợp own offer HOÀN TOÀN
+        # không có dữ liệu tương ứng (own offer thiếu "value" ở đúng index đó
+        # — đã xác nhận trade_environment_values có thể thiếu key "value" ở 1
+        # số phần tử, xem guard "value" in item tương tự ở build_compare_url()
+        # dòng 274 — hoặc attributes_raw rỗng/None hoàn toàn, bug đã bị agent
+        # review phát hiện: trước đây rơi vào trường hợp này thì mất luôn
+        # filter attribute, không còn cách nào cứu).
         if key == "te_v":
-            renamed["tradeEnvironmentValue"] = [te_value_map.get(0, values[0] if values else "")]
+            sheet_te_fallback[0] = values[0] if values else ""
+            continue
         elif key.startswith("te_v") and key[4:].isdigit():
-            idx = int(key[4:])
-            renamed[f"tradeEnvironmentValue{idx}"] = [te_value_map.get(idx, values[0] if values else "")]
-        elif key == "attribute_value_id" and has_te_v:
-            attr_key = detail_attr_key or (parsed.path.split("/")[1] if len(parsed.path.split("/")) > 1 else "")
-            attr_val = detail_attr_value_id or (values[0] if values else "")
-            if attr_key:
-                renamed[attr_key] = [attr_val]
+            sheet_te_fallback[int(key[4:])] = values[0] if values else ""
+            continue
+        elif key == "attribute_value_id":
+            sheet_attr_value_fallback = values[0] if values else None
+            continue
         elif key == "attr_ids":
             renamed["offerAttributeIdsCsv"] = values
         else:
             renamed[key] = values
+
+    for idx in set(te_value_map) | set(sheet_te_fallback):
+        # own offer có mặt ở index này (kể cả "value" rỗng thật sự) LUÔN
+        # thắng — chỉ rơi về sheet_te_fallback khi own offer HOÀN TOÀN không
+        # có entry ở index đó. Dùng `in`/`te_value_map[idx]` thay vì
+        # `te_value_map.get(idx) or ...` — bug thật vừa bị agent review phát
+        # hiện: `or` coi own-offer value rỗng ("") giống hệt "không có",
+        # khiến giá trị SHEET CŨ (có thể sai/lỗi thời) len vào thay vì đúng
+        # ý own offer hiện tại (rỗng = không lọc theo chiều đó).
+        value = te_value_map[idx] if idx in te_value_map else sheet_te_fallback.get(idx)
+        if value:
+            renamed[f"tradeEnvironmentValue{idx}"] = [value]
+
+    # own offer LUÔN thắng nếu nó có giá trị; chỉ rơi về giá trị
+    # attribute_value_id của sheet URL khi own offer HOÀN TOÀN không có
+    # (detail_attr_value_id is None) — không dùng `or` vì lý do tương tự
+    # tradeEnvironmentValue ở trên.
+    resolved_attr_value = detail_attr_value_id if detail_attr_value_id is not None else sheet_attr_value_fallback
+    if resolved_attr_value is not None:
+        attr_key = detail_attr_key
+        if attr_key is None and attr_key_guessable_from_path:
+            path_parts = parsed.path.split("/")
+            attr_key = path_parts[1] if len(path_parts) > 1 else ""
+        if attr_key:
+            renamed[attr_key] = [str(resolved_attr_value)]
+
     params = renamed
 
     extra_params = urlencode(params, doseq=True, quote_via=quote)

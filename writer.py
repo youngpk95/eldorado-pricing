@@ -27,7 +27,7 @@ from decimal import Decimal
 import httpx
 
 import config
-from eldorado_api import EldoradoClient
+from eldorado_api import EldoradoClient, resolve_attribute_value_id
 from models import OfferUrls, OwnOffer
 
 logger = logging.getLogger(__name__)
@@ -43,8 +43,7 @@ READ_ONLY_FIELDS = [
 def _build_offer_attributes(raw_attributes: list[dict]) -> list[dict]:
     result = []
     for attr in raw_attributes:
-        value = attr.get("value")
-        value_id = value.get("id") if isinstance(value, dict) else value
+        value_id = resolve_attribute_value_id(attr.get("value"))
         if "id" in attr and value_id is not None:
             result.append({"id": attr["id"], "type": attr.get("type", "Select"), "value": value_id})
     return result
