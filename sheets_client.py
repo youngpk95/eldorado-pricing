@@ -462,23 +462,14 @@ class SheetsClient:
         if link:
             data.append({"range": f"{config.CONFIG_RANGE}!{ownurl_col}{sheet_row}", "values": [[link]]})
 
-        last_error: Exception | None = None
-        for attempt in range(1, self.WRITE_RESULT_MAX_ATTEMPTS + 1):
-            try:
-                with self._lock:
-                    self._service.values().batchUpdate(
-                        spreadsheetId=config.SHEET_CONFIG_ID,
-                        body={"valueInputOption": "USER_ENTERED", "data": data},
-                    ).execute()
-                return
-            except Exception as e:
-                last_error = e
-                if attempt < self.WRITE_RESULT_MAX_ATTEMPTS:
-                    logger.warning(
-                        "[sheets] Ghi kết quả dòng %s lỗi (lần %d/%d), thử lại: %s",
-                        sheet_row, attempt, self.WRITE_RESULT_MAX_ATTEMPTS, e,
-                    )
-                    time.sleep(self.WRITE_RESULT_RETRY_DELAY_SECONDS)
+        last_error = self._batch_update_with_retry(
+            data,
+            max_attempts=self.WRITE_RESULT_MAX_ATTEMPTS,
+            retry_delay_seconds=self.WRITE_RESULT_RETRY_DELAY_SECONDS,
+            log_context=f"Ghi kết quả dòng {sheet_row}",
+        )
+        if last_error is None:
+            return
 
         logger.error(
             "[sheets] Lỗi ghi kết quả dòng %s (đã thử %d lần): %s",
@@ -490,3 +481,65 @@ class SheetsClient:
                 "— offer CŨ đã bị xoá thật, phải tự dán link này vào cột 'My Listing URL' (cột %s): %s",
                 sheet_row, ownurl_col, link,
             )
+
+    def _batch_update_with_retry(
+        self, data: list[dict], *, max_attempts: int, retry_delay_seconds: float, log_context: str,
+    ) -> Exception | None:
+        """Logic retry DÙNG CHUNG cho mọi lần ghi qua `values().batchUpdate`
+        (write_result, write_version_cell) — trước đây mỗi hàm tự lặp lại y
+        hệt vòng lặp lock/batchUpdate/sleep/log này, dễ sửa 1 chỗ quên chỗ
+        kia (như đã từng xảy ra thật với retry của write_result, xem docstring
+        cũ ở đó). Trả None nếu ghi thành công, hoặc exception cuối cùng nếu
+        hết `max_attempts` lần mà vẫn lỗi — bên gọi tự quyết định log gì/làm
+        gì thêm khi thất bại (mỗi nơi gọi cần thông điệp khác nhau)."""
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with self._lock:
+                    self._service.values().batchUpdate(
+                        spreadsheetId=config.SHEET_CONFIG_ID,
+                        body={"valueInputOption": "USER_ENTERED", "data": data},
+                    ).execute()
+                return None
+            except Exception as e:
+                last_error = e
+                if attempt < max_attempts:
+                    logger.warning(
+                        "[sheets] %s lỗi (lần %d/%d), thử lại: %s",
+                        log_context, attempt, max_attempts, e,
+                    )
+                    time.sleep(retry_delay_seconds)
+        return last_error
+
+    WRITE_VERSION_MAX_ATTEMPTS = 3
+    WRITE_VERSION_RETRY_DELAY_SECONDS = 2
+
+    def write_version_cell(self, value: str) -> None:
+        """Ghi 1 ô DUY NHẤT (config.VERSION_CELL, mặc định 'AC1' trên tab
+        CONFIG_RANGE) hiển thị version tool + trạng thái tự cập nhật + giờ
+        ghi gần nhất — để xem được máy nào đang chạy bản nào TỪ XA, chỉ cần
+        mở sheet của máy đó (xem main._write_version_status, nơi ghép chuỗi
+        `value`). Gọi lúc khởi động process VÀ mỗi lần tới kỳ hạn kiểm tra
+        cập nhật (KHÔNG phải mỗi chu kỳ định giá — tránh spam Sheets API).
+
+        Đây là ô CỐ ĐỊNH, không phải theo dòng sản phẩm nào nên không cần
+        _resolve_sheet_row. Lỗi ghi ô này (vd Sheets API tạm quá tải) KHÔNG
+        được raise lên — chỉ log rồi bỏ qua, sheet tạm hiển thị version CŨ
+        tới lần ghi kế tiếp; tính năng hiển thị version không được phép làm
+        hỏng 1 chu kỳ định giá đang chạy vì lý do phụ này."""
+        data = [{"range": f"{config.CONFIG_RANGE}!{config.VERSION_CELL}", "values": [[value]]}]
+
+        last_error = self._batch_update_with_retry(
+            data,
+            max_attempts=self.WRITE_VERSION_MAX_ATTEMPTS,
+            retry_delay_seconds=self.WRITE_VERSION_RETRY_DELAY_SECONDS,
+            log_context="Ghi ô version",
+        )
+        if last_error is None:
+            return
+
+        logger.error(
+            "[sheets] Lỗi ghi ô version (đã thử %d lần) — sheet sẽ tạm hiển thị version CŨ tới lần kiểm "
+            "tra cập nhật kế tiếp: %s",
+            self.WRITE_VERSION_MAX_ATTEMPTS, last_error,
+        )

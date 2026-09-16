@@ -7,7 +7,7 @@ bị agent review phát hiện: trước đây except bọc luôn cả bước e
 vòng lặp chính tiếp tục chạy với 1 httpx client đã đóng nếu execv lỗi)."""
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -111,46 +111,86 @@ def test_resolve_external_cells_noop_when_no_link_filled():
     assert raw_rows[0] == {"EXTERNAL_SHEET_LINK": "", "EXTERNAL_SHEET_NAME": "", "EXTERNAL_SHEET_CELL": "", "EXTERNAL_SHEET_CELL_MAX": ""}
 
 
+def test_write_version_status_formats_cell_value(monkeypatch):
+    monkeypatch.setattr(updater, "get_version_info", lambda: ("47", "f4ef8ee"))
+    sheets = MagicMock()
+
+    main._write_version_status(sheets, main.VERSION_STATUS_STARTUP)
+
+    written = sheets.write_version_cell.call_args[0][0]
+    assert written.startswith("Version #47 (f4ef8ee) | Mới khởi động, chưa kiểm tra cập nhật | ")
+
+
 @pytest.mark.asyncio
 async def test_check_and_apply_update_noop_when_no_new_commit(monkeypatch):
     monkeypatch.setattr(updater, "check_for_update", lambda branch: False)
     pull_called = []
-    monkeypatch.setattr(updater, "pull_update", lambda branch: pull_called.append(branch) or True)
+    monkeypatch.setattr(updater, "pull_update", lambda branch: pull_called.append(branch))
+    monkeypatch.setattr(updater, "get_version_info", lambda: ("47", "f4ef8ee"))
     client = AsyncMock()
+    sheets = MagicMock()
 
-    await _check_and_apply_update(client)
+    await _check_and_apply_update(client, sheets)
 
     assert pull_called == []
     client.aclose.assert_not_called()
+    assert sheets.write_version_cell.call_count == 1
+    assert "OK" in sheets.write_version_cell.call_args[0][0]
 
 
 @pytest.mark.asyncio
 async def test_check_and_apply_update_error_before_close_does_not_close_client(monkeypatch):
     """Lỗi ở bước kiểm tra/pull (vd mất mạng) chỉ log + bỏ qua — KHÔNG được
-    đóng client, để chu kỳ sau vẫn xử lý sản phẩm bình thường."""
+    đóng client, để chu kỳ sau vẫn xử lý sản phẩm bình thường. Vẫn phải ghi
+    rõ lý do lỗi lên ô version trên sheet (không im lặng như hành vi cũ)."""
     def raise_error(branch):
         raise RuntimeError("mất mạng")
 
     monkeypatch.setattr(updater, "check_for_update", raise_error)
+    monkeypatch.setattr(updater, "get_version_info", lambda: ("47", "f4ef8ee"))
     client = AsyncMock()
+    sheets = MagicMock()
 
-    await _check_and_apply_update(client)  # không raise ra ngoài
+    await _check_and_apply_update(client, sheets)  # không raise ra ngoài
 
     client.aclose.assert_not_called()
+    assert sheets.write_version_cell.call_count == 1
+    assert "Lỗi không mong đợi khi kiểm tra cập nhật" in sheets.write_version_cell.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_check_and_apply_update_writes_error_status_on_update_check_error(monkeypatch):
+    monkeypatch.setattr(
+        updater, "check_for_update",
+        lambda branch: (_ for _ in ()).throw(updater.UpdateCheckError("mất mạng")),
+    )
+    monkeypatch.setattr(updater, "get_version_info", lambda: ("47", "f4ef8ee"))
+    client = AsyncMock()
+    sheets = MagicMock()
+
+    await _check_and_apply_update(client, sheets)
+
+    client.aclose.assert_not_called()
+    written = sheets.write_version_cell.call_args[0][0]
+    assert "Lỗi kiểm tra cập nhật" in written
+    assert "mất mạng" in written
 
 
 @pytest.mark.asyncio
 async def test_check_and_apply_update_pulls_closes_client_and_restarts(monkeypatch):
     monkeypatch.setattr(updater, "check_for_update", lambda branch: True)
-    monkeypatch.setattr(updater, "pull_update", lambda branch: True)
+    monkeypatch.setattr(updater, "pull_update", lambda branch: None)
+    monkeypatch.setattr(updater, "get_version_info", lambda: ("47", "f4ef8ee"))
     execv_calls = []
     monkeypatch.setattr(main.os, "execv", lambda executable, args: execv_calls.append((executable, args)))
     client = AsyncMock()
+    sheets = MagicMock()
 
-    await _check_and_apply_update(client)
+    await _check_and_apply_update(client, sheets)
 
     client.aclose.assert_awaited_once()
     assert len(execv_calls) == 1
+    assert sheets.write_version_cell.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -159,15 +199,17 @@ async def test_check_and_apply_update_reraises_when_execv_fails_after_client_clo
     đã đóng, KHÔNG được nuốt lỗi rồi để vòng lặp chính tiếp tục chạy với
     client hỏng — phải để lỗi lan ra ngoài (crash rõ ràng thay vì âm thầm hỏng)."""
     monkeypatch.setattr(updater, "check_for_update", lambda branch: True)
-    monkeypatch.setattr(updater, "pull_update", lambda branch: True)
+    monkeypatch.setattr(updater, "pull_update", lambda branch: None)
+    monkeypatch.setattr(updater, "get_version_info", lambda: ("47", "f4ef8ee"))
 
     def broken_execv(executable, args):
         raise OSError("sys.executable không còn tồn tại")
 
     monkeypatch.setattr(main.os, "execv", broken_execv)
     client = AsyncMock()
+    sheets = MagicMock()
 
     with pytest.raises(OSError):
-        await _check_and_apply_update(client)
+        await _check_and_apply_update(client, sheets)
 
     client.aclose.assert_awaited_once()  # đã đóng trước khi execv thất bại

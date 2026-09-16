@@ -256,6 +256,33 @@ def test_write_result_retries_then_succeeds(monkeypatch):
     assert fake_service.values.return_value.batchUpdate.return_value.execute.call_count == 3
 
 
+def test_write_version_cell_writes_expected_range_and_value(monkeypatch):
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+    monkeypatch.setattr(config, "VERSION_CELL", "AC1")
+
+    client, fake_service = _make_write_client()
+
+    client.write_version_cell("Version #47 (f4ef8ee) | OK | 17/09/2026 14:32:05")
+
+    body = fake_service.values.return_value.batchUpdate.call_args.kwargs["body"]
+    assert body["data"] == [{"range": "Sheet1!AC1", "values": [["Version #47 (f4ef8ee) | OK | 17/09/2026 14:32:05"]]}]
+
+
+def test_write_version_cell_gives_up_without_raising_after_max_attempts(monkeypatch):
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+    monkeypatch.setattr(config, "VERSION_CELL", "AC1")
+    monkeypatch.setattr(SheetsClient, "WRITE_VERSION_RETRY_DELAY_SECONDS", 0)
+
+    client, fake_service = _make_write_client()
+    fake_service.values.return_value.batchUpdate.return_value.execute.side_effect = Exception("mất kết nối")
+
+    client.write_version_cell("Version #47 (f4ef8ee) | OK | 17/09/2026 14:32:05")  # không raise
+
+    assert fake_service.values.return_value.batchUpdate.return_value.execute.call_count == SheetsClient.WRITE_VERSION_MAX_ATTEMPTS
+
+
 def test_extract_spreadsheet_id_from_full_url():
     url = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit#gid=123"
     assert extract_spreadsheet_id(url) == "1AbCdEfGhIjKlMnOpQrStUvWxYz"

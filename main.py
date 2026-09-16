@@ -11,6 +11,7 @@ import logging
 import logging.handlers
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Ép UTF-8 cho stdout/stderr — console Windows mặc định (code page cp1252)
@@ -59,6 +60,10 @@ def _compute_loop_delay(rows: list[ProductRow]) -> float:
         if cfg.enabled and cfg.relax_seconds is not None
     ]
     return max(relax_values) if relax_values else config.LOOP_DELAY_SECONDS
+
+
+VERSION_STATUS_STARTUP = "Mới khởi động, chưa kiểm tra cập nhật"
+VERSION_STATUS_OK = "OK"
 
 
 # (resolved_key ghi tạm vào raw row) <- (tên cột Cell Min/Cell Max tương ứng)
@@ -122,25 +127,82 @@ async def run_one_cycle(sheets: SheetsClient, client: EldoradoClient, semaphore:
     return _compute_loop_delay(rows)
 
 
-async def _check_and_apply_update(client: EldoradoClient) -> None:
+def _log_version(status: str) -> tuple[str, str]:
+    """Ghi phẳng version hiện tại (đếm commit + hash ngắn) ra log file/console
+    — để version cũng nằm trong log cục bộ, không chỉ trên sheet. Gọi kèm MỖI
+    LẦN ghi ô version lên sheet (khởi động + mỗi lần tới kỳ hạn kiểm tra cập
+    nhật). Trả lại (count, short_hash) để _write_version_status dùng lại
+    luôn, tránh gọi git 2 lần (1 cho log, 1 cho chuỗi ghi sheet)."""
+    count, short_hash = updater.get_version_info()
+    logger.info(
+        "[version] Đang chạy commit #%s (%s) — branch theo dõi: %s — trạng thái tự cập nhật: %s",
+        count, short_hash, config.GIT_BRANCH, status,
+    )
+    return count, short_hash
+
+
+def _write_version_status(sheets: SheetsClient, status: str) -> None:
+    """Log version ra file/console (_log_version) RỒI ghi 1 chuỗi tổng hợp
+    version + status + giờ vào ô version cố định trên sheet (config.
+    VERSION_CELL, xem SheetsClient.write_version_cell). status="OK" khi lần
+    kiểm tra gần nhất bình thường (có hay không có bản mới không quan trọng
+    với người xem sheet); mọi giá trị khác là lý do lỗi ngắn gọn (xem
+    _check_and_apply_update) — để 1 auto-updater hỏng LỘ RA trên sheet, không
+    chỉ nằm im trong log máy đó.
+
+    KHÔNG raise: updater.get_version_info() và sheets.write_version_cell()
+    đều đã tự cô lập lỗi của riêng chúng."""
+    count, short_hash = _log_version(status)
+    timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    sheets.write_version_cell(f"Version #{count} ({short_hash}) | {status} | {timestamp}")
+
+
+async def _check_and_apply_update(client: EldoradoClient, sheets: SheetsClient) -> None:
     """Tự kiểm tra + tự cập nhật code khi nhánh GitHub đang theo dõi có
     commit mới — CHỈ được gọi ở ĐIỂM AN TOÀN trong main() (ngay sau khi 1 chu
     kỳ repricing đã chạy xong hoàn toàn, không có task nào đang dở dang), vì
     đây là tool production (DRY_RUN có thể =False, đang chạy live) — không
-    được restart giữa chừng lúc đang xử lý sản phẩm. Lỗi ở đây (mất mạng, git
-    pull conflict...) chỉ log, không được làm crash vòng lặp chính."""
+    được restart giữa chừng lúc đang xử lý sản phẩm.
+
+    Ghi trạng thái (OK / lỗi kiểm tra / lỗi pull) lên ô version trên sheet ở
+    MỌI nhánh return — trước đây lỗi kiểm tra cập nhật chỉ log rồi im lặng bỏ
+    qua, khiến 1 máy auto-update hỏng hoàn toàn (vd git auth/branch/network
+    sai) chạy code CŨ vĩnh viễn mà không ai biết trừ khi grep log cục bộ máy
+    đó."""
     try:
-        if not await asyncio.to_thread(updater.check_for_update, config.GIT_BRANCH):
-            return
-        logger.info(
-            "[updater] Phát hiện bản cập nhật mới trên GitHub (branch %s), đang pull...",
-            config.GIT_BRANCH,
-        )
-        if not await asyncio.to_thread(updater.pull_update, config.GIT_BRANCH):
-            return
-    except Exception:
-        logger.exception("[updater] Lỗi không mong đợi khi kiểm tra/áp dụng cập nhật GitHub — bỏ qua.")
+        update_available = await asyncio.to_thread(updater.check_for_update, config.GIT_BRANCH)
+    except updater.UpdateCheckError as e:
+        await asyncio.to_thread(_write_version_status, sheets, f"Lỗi kiểm tra cập nhật: {e}")
         return
+    except Exception:
+        logger.exception("[updater] Lỗi không mong đợi khi kiểm tra cập nhật GitHub — bỏ qua.")
+        await asyncio.to_thread(_write_version_status, sheets, "Lỗi không mong đợi khi kiểm tra cập nhật")
+        return
+
+    if not update_available:
+        await asyncio.to_thread(_write_version_status, sheets, VERSION_STATUS_OK)
+        return
+
+    logger.info(
+        "[updater] Phát hiện bản cập nhật mới trên GitHub (branch %s), đang pull...",
+        config.GIT_BRANCH,
+    )
+    try:
+        await asyncio.to_thread(updater.pull_update, config.GIT_BRANCH)
+    except updater.UpdatePullError as e:
+        await asyncio.to_thread(_write_version_status, sheets, f"Lỗi pull cập nhật: {e}")
+        return
+    except Exception:
+        logger.exception("[updater] Lỗi không mong đợi khi pull cập nhật GitHub — bỏ qua.")
+        await asyncio.to_thread(_write_version_status, sheets, "Lỗi không mong đợi khi pull cập nhật")
+        return
+
+    # Pull vừa thành công: HEAD local trên đĩa đã đổi sang commit mới (dù
+    # process hiện tại vẫn đang chạy code CŨ trong RAM tới khi execv xong) —
+    # ghi lại NGAY để nếu execv thất bại/crash trước khi kịp restart, sheet
+    # vẫn phản ánh đúng commit đang nằm trên đĩa thay vì im lặng hiển thị
+    # version cũ.
+    await asyncio.to_thread(_write_version_status, sheets, VERSION_STATUS_OK)
 
     # Từ đây trở đi KHÔNG được nuốt lỗi im lặng nữa: client sắp bị đóng, nếu
     # os.execv thất bại (vd sys.executable bị xoá/đổi chỗ, bị AV chặn...) mà
@@ -168,6 +230,7 @@ async def main() -> None:
     client = EldoradoClient(get_cookie=auth.get_cookie)
     semaphore = asyncio.Semaphore(config.CONCURRENCY_LIMIT)
     last_update_check = 0.0
+    await asyncio.to_thread(_write_version_status, sheets, VERSION_STATUS_STARTUP)
 
     try:
         while True:
@@ -183,7 +246,7 @@ async def main() -> None:
             now = asyncio.get_event_loop().time()
             if now - last_update_check >= config.UPDATE_CHECK_INTERVAL_SECONDS:
                 last_update_check = now
-                await _check_and_apply_update(client)  # điểm an toàn: đã hết chu kỳ, chưa sleep
+                await _check_and_apply_update(client, sheets)  # điểm an toàn: đã hết chu kỳ, chưa sleep
 
             await asyncio.sleep(loop_delay)
     finally:

@@ -82,3 +82,13 @@ DRY_RUN = _get("DRY_RUN", "true").strip().lower() != "false"
 # tra. Không cần GITHUB_TOKEN: dùng lại git credential đã cache sẵn trên máy.
 GIT_BRANCH = _get("GIT_BRANCH", "master")
 UPDATE_CHECK_INTERVAL_SECONDS = float(_get("UPDATE_CHECK_INTERVAL_SECONDS", "300"))
+
+# Ô (1 ô DUY NHẤT, trên CHÍNH tab CONFIG_RANGE — không phải tab riêng) hiển
+# thị version tool (đếm commit + hash ngắn) + trạng thái tự cập nhật (OK /
+# lỗi kiểm tra / lỗi pull) + giờ ghi gần nhất — mở sheet của bất kỳ máy nào
+# là biết ngay máy đó đang chạy bản nào, không cần log cục bộ (xem
+# main._write_version_status). Mặc định "AC1": sheet_schema.COLUMNS hiện
+# chiếm đúng cột A..AA (27 cột) — AC1 chừa dư 1 cột trống (AB) làm khoảng
+# cách, ở dòng 1 (dễ thấy ngay khi mở sheet), không đụng dữ liệu sản phẩm
+# nào kể cả khi thêm vài cột COLUMNS mới liền kề AA.
+VERSION_CELL = _get("VERSION_CELL", "AC1")
