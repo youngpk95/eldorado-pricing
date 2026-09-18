@@ -145,7 +145,7 @@ Max` vào giữa bảng làm lệch mọi cột phía sau).
 Xem đầy đủ 25 cột + giải thích trong `sheet_schema.py` (`COLUMNS`), hoặc mở
 sheet thật và rê chuột vào từng ô header. Tóm tắt nhanh: `Enabled` (checkbox
 bật/tắt dòng), `Name`, 3 cột tool tự ghi (`Status`/`Updated At`/`New Link`),
-`My Listing URL`/`Compare URL`, `Stock`, `Price Min`/`Price Max`,
+`My Listing URL`/`Compare URL`, `Stock`, `Min Stock Update`, `Price Min`/`Price Max`,
 `Discount`/`Round Decimals`/`Always Undercut` (checkbox), `Min Purchase
 Base`/`Min Purchase Step`, 3 cột lọc đối thủ (`Min Competitor Stock`, `Min
 Competitor Ratings`, `Min Feedback %`), `Seller Blacklist`, `Exclude
@@ -153,6 +153,14 @@ Keywords`/`Require Keywords` (lọc đối thủ theo từ khoá trong tiêu đ�
 `Allow Recreate on Rate Limit` (checkbox), `Relax (seconds)`, và 4 cột `Link
 Sheet`/`Name Sheet`/`Cell Min`/`Cell Max` (đọc Price Min/Price Max từ sheet
 khác, để trống nếu không cần).
+
+**Lưu ý về `Min Stock Update`:** để trống thì tool luôn đồng bộ `Stock` mỗi
+khi khác số lượng đang live trên listing (hành vi mặc định). Điền số vào
+đây thì tool CHỈ thực sự ghi update stock lên Eldorado khi stock đang live
+xuống DƯỚI số này — còn >= số này thì bỏ qua phần stock (Price/Min Purchase
+Base vẫn tính/update độc lập, không bị ảnh hưởng). Port lại từ ngưỡng
+`STOCK_MIN_UP` của tool cũ, dùng để tránh gọi API update thừa khi stock vẫn
+còn dư dả.
 
 **Lưu ý về `Relax (seconds)`:** đây là cấu hình cho CẢ VÒNG CHẠY (nghỉ sau
 khi xong HẾT sản phẩm đang bật), không phải riêng 1 sản phẩm — nếu nhiều

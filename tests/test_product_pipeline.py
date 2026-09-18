@@ -242,6 +242,100 @@ async def test_process_product_syncs_stock_quantity(monkeypatch):
     assert "Stock: 100 -> 5" in note
 
 
+@pytest.mark.asyncio
+async def test_process_product_holds_stock_below_min_stock_update_threshold(monkeypatch):
+    """offer.quantity=100 vẫn >= MIN_STOCK_UPDATE=50 -> chưa xuống ngưỡng,
+    bỏ qua update stock dù Stock sheet=5 khác hẳn quantity hiện tại. Giá đã
+    tối ưu sẵn (113.97) + không có Min Purchase Base -> không còn thay đổi
+    nào khác -> dòng báo 'Không có thay đổi'."""
+    monkeypatch.setattr(config, "DRY_RUN", True)
+    row = make_row(STOCK="5", MIN_STOCK_UPDATE="50")
+
+    own_offer = make_own_offer(price="113.97", quantity=100)
+    urls = OfferUrls(detail="d", compare="c", update="u", change="ch")
+
+    client = AsyncMock()
+    client.get_own_offer.return_value = (own_offer, urls)
+    client.build_compare_url = MagicMock(return_value="https://api/compare")
+    client.get_competitors.return_value = [
+        {
+            "user": {"username": "Rival"},
+            "offer": {"pricePerUnit": {"amount": 113.98}, "quantity": 50, "guaranteedDeliveryTime": "instant", "offerTitle": ""},
+            "userOrderInfo": {"ratingCount": 100, "feedbackScore": 99},
+        },
+    ]
+
+    sheets = FakeSheets()
+    await process_product(row, sheets, client)
+
+    _, note, link, _ = sheets.writes[0]
+    assert "Stock: 100 -> 100" in note
+    assert "⏸️" in note and "Min Stock Update=50" in note
+    assert "Không có thay đổi" in note
+    assert link is None
+
+
+@pytest.mark.asyncio
+async def test_process_product_updates_stock_when_below_min_stock_update_threshold(monkeypatch):
+    """offer.quantity=100 < MIN_STOCK_UPDATE=150 -> đã xuống dưới ngưỡng,
+    đồng bộ stock bình thường như khi không có ngưỡng."""
+    monkeypatch.setattr(config, "DRY_RUN", True)
+    row = make_row(STOCK="5", MIN_STOCK_UPDATE="150")
+
+    own_offer = make_own_offer(price="113.97", quantity=100)
+    urls = OfferUrls(detail="d", compare="c", update="u", change="ch")
+
+    client = AsyncMock()
+    client.get_own_offer.return_value = (own_offer, urls)
+    client.build_compare_url = MagicMock(return_value="https://api/compare")
+    client.get_competitors.return_value = [
+        {
+            "user": {"username": "Rival"},
+            "offer": {"pricePerUnit": {"amount": 113.98}, "quantity": 50, "guaranteedDeliveryTime": "instant", "offerTitle": ""},
+            "userOrderInfo": {"ratingCount": 100, "feedbackScore": 99},
+        },
+    ]
+
+    sheets = FakeSheets()
+    await process_product(row, sheets, client)
+
+    _, note, _, _ = sheets.writes[0]
+    assert "Stock: 100 -> 5" in note
+    assert "⏸️" not in note
+
+
+@pytest.mark.asyncio
+async def test_process_product_still_updates_price_while_stock_held(monkeypatch):
+    """Ngưỡng Min Stock Update chỉ chặn riêng phần stock — Price vẫn phải
+    tính/update độc lập, không bị bỏ qua theo (yêu cầu đã xác nhận với
+    user: chỉ giữ stock, không giữ cả dòng)."""
+    monkeypatch.setattr(config, "DRY_RUN", True)
+    row = make_row(STOCK="5", MIN_STOCK_UPDATE="50")
+
+    own_offer = make_own_offer(price="120", quantity=100)  # giá cần đổi
+    urls = OfferUrls(detail="d", compare="c", update="u", change="ch")
+
+    client = AsyncMock()
+    client.get_own_offer.return_value = (own_offer, urls)
+    client.build_compare_url = MagicMock(return_value="https://api/compare")
+    client.get_competitors.return_value = [
+        {
+            "user": {"username": "Rival"},
+            "offer": {"pricePerUnit": {"amount": 113.98}, "quantity": 50, "guaranteedDeliveryTime": "instant", "offerTitle": ""},
+            "userOrderInfo": {"ratingCount": 100, "feedbackScore": 99},
+        },
+    ]
+
+    sheets = FakeSheets()
+    await process_product(row, sheets, client)
+
+    _, note, _, _ = sheets.writes[0]
+    assert "[DRY RUN]" in note
+    assert "113.97" in note  # giá mới vẫn được tính ra bình thường
+    assert "Stock: 100 -> 100" in note  # stock bị giữ, không theo Stock sheet=5
+    assert "⏸️" in note
+
+
 class FakeCreateResponse:
     """Giả lập httpx.Response cho request POST tạo offer mới (không cần đủ
     thuộc tính như FakeResponse của test_writer.py, chỉ dùng ở đây)."""

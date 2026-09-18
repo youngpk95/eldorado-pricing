@@ -88,6 +88,14 @@ class RowConfig:
         return _to_int(self.row.get("STOCK"), 0)
 
     @property
+    def min_stock_update(self) -> int | None:
+        """Ngưỡng port từ tool cũ (STOCK_MIN_UP, checkupdate.py) — chỉ update
+        stock lên Eldorado khi stock ĐANG LIVE (offer.quantity) xuống dưới số
+        này; để trống = giữ hành vi cũ, luôn đồng bộ. Xem _compute_target."""
+        v = self.row.get("MIN_STOCK_UPDATE")
+        return _to_int(v, None) if v else None
+
+    @property
     def external_sheet_link(self) -> str:
         return self.row.get("EXTERNAL_SHEET_LINK")
 
@@ -318,6 +326,15 @@ async def _compute_target(
     )
 
     new_stock = cfg.stock
+    stock_held_note = None
+    if cfg.min_stock_update is not None and offer.quantity >= cfg.min_stock_update:
+        if new_stock != offer.quantity:
+            stock_held_note = (
+                f"⏸️ Stock giữ nguyên={offer.quantity} (chưa xuống dưới ngưỡng "
+                f"Min Stock Update={cfg.min_stock_update}, dù Stock trong sheet={new_stock})"
+            )
+        new_stock = offer.quantity
+
     new_min_qty = offer.min_quantity
     if cfg.min_purchase_base is not None and new_price > 0:
         new_min_qty = pricing.find_min_quantity(cfg.min_purchase_base, new_price, cfg.min_purchase_coef)
@@ -326,6 +343,8 @@ async def _compute_target(
         f"Giá: {offer.price} -> {new_price} | Stock: {offer.quantity} -> {new_stock} | "
         f"minQty: {offer.min_quantity} -> {new_min_qty}"
     ]
+    if stock_held_note:
+        note_lines.append(stock_held_note)
     if cheapest:
         note_lines.append(f"Đối thủ rẻ nhất hợp lệ: {cheapest.seller} = {cheapest.price}")
     else:
