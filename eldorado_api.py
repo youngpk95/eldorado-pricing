@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from decimal import Decimal
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
@@ -249,6 +250,29 @@ class EldoradoApiError(RuntimeError):
     pass
 
 
+IMAGE_UPLOAD_URL = API_BASE + "/files/me/Offer"
+_UPLOADED_IMAGE_RE = re.compile(r"(Small|Large|Original)\.[A-Za-z0-9]+$")
+_IMAGE_FIELD_BY_SIZE = {"Small": "smallImage", "Large": "largeImage", "Original": "originalSizeImage"}
+
+
+def parse_uploaded_image_paths(local_paths) -> dict[str, str]:
+    """Response upload ảnh của Eldorado trả `localPaths` = 3 đường dẫn
+    `/offerimages/<tên>Small.png|Large|Original` (bắt từ trang sửa offer thật
+    2026-09-20). Trong JSON offer, ảnh chính (`mainOfferImage`) lưu đúng 3 tên
+    file TRẦN, KHÔNG có tiền tố `/offerimages/` — hàm này đổi sang dạng đó.
+    Ném EldoradoApiError nếu thiếu bất kỳ cỡ nào."""
+    result: dict[str, str] = {}
+    for path in local_paths or []:
+        name = str(path).rsplit("/", 1)[-1]
+        m = _UPLOADED_IMAGE_RE.search(name)
+        if m:
+            result[_IMAGE_FIELD_BY_SIZE[m.group(1)]] = name
+    missing = set(_IMAGE_FIELD_BY_SIZE.values()) - set(result)
+    if missing:
+        raise EldoradoApiError(f"Response upload ảnh thiếu {sorted(missing)} — Eldorado có thể đã đổi API")
+    return result
+
+
 class OfferNotFoundError(EldoradoApiError):
     """Offer không còn tồn tại (400/404) — tách riêng khỏi EldoradoApiError
     chung chung để product_pipeline.py xử lý khác đi: thử TỰ TẠO LẠI từ
@@ -344,6 +368,21 @@ class EldoradoClient:
         await self._pace_write()
         headers = await self._headers(content_type=True)
         return await self._http.post(url, headers=headers, json=payload)
+
+    async def upload_offer_image(self, data: bytes, filename: str, content_type: str) -> dict[str, str]:
+        """Upload 1 ảnh offer (multipart, field `image`) — trả về dict
+        smallImage/largeImage/originalSizeImage để gắn vào `mainOfferImage`.
+        KHÔNG ép Content-Type: json (httpx tự đặt multipart + boundary)."""
+        await self._pace_write()
+        headers = await self._headers()
+        resp = await self._http.post(IMAGE_UPLOAD_URL, headers=headers, files={"image": (filename, data, content_type)})
+        if resp.status_code != 200:
+            raise EldoradoApiError(f"Upload ảnh lên Eldorado thất bại (status {resp.status_code}) — {resp.text[:200]}")
+        try:
+            local_paths = resp.json().get("localPaths")
+        except ValueError as e:
+            raise EldoradoApiError("Response upload ảnh không phải JSON") from e
+        return parse_uploaded_image_paths(local_paths)
 
     async def delete(self, url: str) -> httpx.Response:
         await self._pace_write()

@@ -27,7 +27,8 @@ from decimal import Decimal
 import httpx
 
 import config
-from eldorado_api import EldoradoClient, resolve_attribute_value_id
+from eldorado_api import EldoradoApiError, EldoradoClient, resolve_attribute_value_id
+from image_source import ImageError, download_image
 from models import OfferUrls, OwnOffer
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ async def apply_update(
     only_price_changed: bool,
     allow_create_new: bool,
     create_new_enabled: bool,
+    image_url: str | None = None,
 ) -> tuple[bool, str, str | None]:
     """Trả về (thành công, mô tả, link offer mới nếu vừa tạo lại).
 
@@ -128,7 +130,14 @@ async def apply_update(
 
     # 429 -> xoá + tạo lại VỚI GIÁ MỚI. Tạo offer mới không bị 429 (xác nhận
     # từ user) nên chỉ cần đúng 1 lần thử — không cần retry loop.
-    new_link, create_status = await create_new_offer(client, offer, new_price, new_qty, new_min_qty)
+    try:
+        new_link, create_status = await create_new_offer(
+            client, offer, new_price, new_qty, new_min_qty, image_url=image_url
+        )
+    except ImageError as e:
+        # Lỗi ảnh xảy ra TRƯỚC khi xoá bất cứ gì (xem create_new_offer) -> offer
+        # cũ còn nguyên, chỉ là chưa đổi được giá/stock do 429.
+        return False, f"429 rate-limit -> KHÔNG tạo lại offer vì lỗi ảnh: {e} (offer cũ được giữ nguyên)", None
     if new_link:
         return True, "429 rate-limit -> xoá + tạo offer mới thành công", new_link
     return False, f"429 rate-limit -> tạo offer mới cũng thất bại (status {create_status})", None
@@ -150,6 +159,7 @@ async def create_new_offer(
     new_price: Decimal,
     new_qty: int,
     new_min_qty: int,
+    image_url: str | None = None,
 ) -> tuple[str | None, int | None]:
     """Xoá offer cũ + tạo offer mới hoàn toàn VỚI GIÁ MỚI luôn — Eldorado's
     429 rate-limit workaround, port từ RequestEldo.create_new. Thứ tự xoá
@@ -168,7 +178,7 @@ async def create_new_offer(
         except Exception as e:
             logger.error("[create_new] Lỗi xoá offer cũ trước: %s", e)
 
-    new_url, status = await _post_new_offer(client, offer, new_price, new_qty, new_min_qty)
+    new_url, status = await _post_new_offer(client, offer, new_price, new_qty, new_min_qty, image_url)
 
     if new_url and not should_delete_before:
         try:
@@ -187,13 +197,29 @@ async def recreate_offer_from_snapshot(
     new_price: Decimal,
     new_qty: int,
     new_min_qty: int,
+    image_url: str | None = None,
 ) -> tuple[str | None, int | None]:
     """Tạo offer mới TỪ SNAPSHOT đã lưu (offer_cache.py) — dùng khi phát
     hiện offer gốc đã 404 ở 1 CHU KỲ SAU (không phải do chính lần chạy này
     xoá — xem product_pipeline.py._recover_missing_offer). KHÁC
     `create_new_offer` ở trên: KHÔNG gọi delete, vì offer gốc đã mất từ
     trước, không còn gì để xoá thêm."""
-    return await _post_new_offer(client, offer, new_price, new_qty, new_min_qty)
+    return await _post_new_offer(client, offer, new_price, new_qty, new_min_qty, image_url)
+
+
+async def _upload_main_image(client: EldoradoClient, image_url: str) -> dict[str, str]:
+    """Tải ảnh từ link (image_source) rồi upload lên Eldorado, trả về dict
+    để gắn vào `details["mainOfferImage"]`. Mọi lỗi -> ImageError (người gọi
+    PHẢI dừng trước khi xoá offer cũ)."""
+    data, filename, content_type = await download_image(image_url)
+    try:
+        return await client.upload_offer_image(data, filename, content_type)
+    except EldoradoApiError as e:
+        raise ImageError(str(e)) from e
+    except httpx.HTTPError as e:
+        # timeout/mất kết nối khi upload — cũng là lỗi ảnh (offer cũ vẫn còn
+        # nguyên), không để lọt ra thành "Lỗi không xác định" chung chung.
+        raise ImageError(f"Upload ảnh lên Eldorado lỗi mạng: {type(e).__name__}") from e
 
 
 async def _post_new_offer(
@@ -202,6 +228,7 @@ async def _post_new_offer(
     new_price: Decimal,
     new_qty: int,
     new_min_qty: int,
+    image_url: str | None = None,
 ) -> tuple[str | None, int | None]:
     """Build payload + gọi POST tạo offer mới — phần dùng chung giữa
     `create_new_offer` (429, có xoá offer cũ kèm theo) và
@@ -224,6 +251,14 @@ async def _post_new_offer(
     details["guaranteedDeliveryTime"] = offer.guaranteed_delivery_time
     details["description"] = offer.description
     details["deliveryMethod"] = offer.delivery_method
+
+    # Ảnh CHỈ áp dụng cho Item (CustomItem) — offer mới không tự mang ảnh,
+    # phải upload lại. Upload XONG mới POST tạo offer: nếu ảnh lỗi thì ImageError
+    # nổ ra ở đây, TRƯỚC khi create_new_offer kịp xoá offer cũ (Item luôn tạo
+    # mới rồi mới xoá cũ). Không có image_url -> giữ hành vi cũ (gửi lại nguyên
+    # mainOfferImage của offer cũ trong raw_offer).
+    if otype == "CustomItem" and image_url:
+        details["mainOfferImage"] = await _upload_main_image(client, image_url)
 
     game_id = offer.raw_offer.get("gameId")
     trade_env_id = offer.trade_environment_values[-1]["id"] if offer.trade_environment_values else None
@@ -252,8 +287,20 @@ async def _post_new_offer(
             "category": "Account",
         }
     elif otype == "CustomItem":
-        url = "https://www.eldorado.gg/api/v1/item-management/me/offers"
-        payload = {"details": details, "gameId": game_id, "category": "CustomItem", "tradeEnvironmentId": trade_env_id}
+        # SỬA 2026-09-20 (bug thật bắt được khi test upload ảnh): URL cũ
+        # `/me/offers` trả 404 — endpoint tạo Item thật là `/me/offers/item`
+        # (cùng họ với endpoint update `/me/offers/item/{id}/details`) và đòi 2
+        # trường `Details` + `AugmentedGame` (xác nhận qua lỗi 400 khi thăm dò
+        # bằng body rỗng), giống shape payload update ở _build_details_payload.
+        url = "https://www.eldorado.gg/api/v1/item-management/me/offers/item"
+        payload = {
+            "details": details,
+            "augmentedGame": {
+                "gameId": game_id, "category": offer.category,
+                "tradeEnvironmentId": trade_env_id, "offerAttributes": offer_attributes,
+                "attributeIdsCsv": None,
+            },
+        }
     else:
         logger.error("[create_new] Category không hỗ trợ tạo mới: %s", otype)
         return None, None
@@ -266,6 +313,13 @@ async def _post_new_offer(
     resp_json = resp.json()
     offer_obj = resp_json.get("offer")
     new_id = offer_obj.get("id") if isinstance(offer_obj, dict) else resp_json.get("id")
+    if not new_id:
+        # Đừng ghép ".../edit/None" thành link "thành công" — create_new_offer sẽ
+        # xoá offer CŨ khi có link, sheet bị ghi đè link rác. Không đọc được id
+        # thì coi như chưa chắc tạo được, KHÔNG xoá gì (có thể đã lỡ tạo 1 offer
+        # mới — cần kiểm tra tay trên dashboard).
+        logger.error("[create_new] Tạo offer trả %s nhưng không đọc được id mới: %s", resp.status_code, resp.text[:200])
+        return None, resp.status_code
     new_url = f"https://www.eldorado.gg/dashboard/offers/{offer.category}/edit/{new_id}"
 
     return new_url, resp.status_code

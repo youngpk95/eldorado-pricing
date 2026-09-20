@@ -472,3 +472,24 @@ def test_write_result_logs_link_when_all_retries_fail(monkeypatch, caplog):
 
     assert fake_service.values.return_value.batchUpdate.return_value.execute.call_count == SheetsClient.WRITE_RESULT_MAX_ATTEMPTS
     assert any("https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id" in r.message for r in caplog.records)
+
+
+def test_read_config_rows_tolerates_missing_optional_image_url_header(monkeypatch):
+    """Máy nào tự cập nhật code mới mà sheet chưa kịp thêm header 'Image URL'
+    KHÔNG được dừng đọc sheet (cùng lớp sự cố schema 2026-09-14) — cột optional
+    thiếu thì coi như trống. Header bắt buộc khác thiếu vẫn phải báo lỗi."""
+    monkeypatch.setattr(config, "SHEET_CONFIG_ID", "dummy")
+    monkeypatch.setattr(config, "CONFIG_RANGE", "Sheet1")
+
+    header = [label for label in _HEADER_LABELS if label != "Image URL"]
+    row = [""] * len(header)
+    row[header.index("Name")] = "Sản phẩm test"
+    row[header.index("My Listing URL")] = "https://www.eldorado.gg/dashboard/offers/CustomItem/edit/abc"
+
+    rows = _make_client_with_values([header, row]).read_config_rows()
+
+    assert len(rows) == 1
+    assert "IMAGE_URL" not in rows[0]
+    from models import ProductRow
+    from product_pipeline import RowConfig
+    assert RowConfig(ProductRow(index=0, raw=rows[0])).image_url is None

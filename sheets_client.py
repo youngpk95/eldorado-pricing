@@ -34,7 +34,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 import config
-from sheet_schema import COLUMNS, INTERNAL_KEYS
+from sheet_schema import COLUMNS, INTERNAL_KEYS, OPTIONAL_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ class SheetsClient:
         for key, label, _note in COLUMNS:
             if label in label_to_index:
                 key_to_index[key] = label_to_index[label]
-            else:
+            elif key not in OPTIONAL_KEYS:
                 missing.append(f"'{label}' ({key})")
         if missing:
             raise RuntimeError(

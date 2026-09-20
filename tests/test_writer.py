@@ -181,3 +181,156 @@ async def test_non_429_failure_does_not_trigger_recreate():
     assert success is False
     assert link is None
     client.post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Upload ảnh khi tạo lại offer Item (image_url) — xem writer._upload_main_image
+# ---------------------------------------------------------------------------
+import writer  # noqa: E402
+from image_source import ImageError  # noqa: E402
+
+UPLOADED = {"smallImage": "new_1Small.png", "largeImage": "new_2Large.png", "originalSizeImage": "new_3Original.png"}
+
+
+def make_item_offer() -> OwnOffer:
+    offer = make_offer()
+    offer.offer_type = "CustomItem"
+    offer.category = "CustomItem"
+    offer.raw_offer = {
+        "gameId": "g1", "category": "CustomItem", "attributes": [], "volumeDiscounts": [],
+        "mainOfferImage": {"smallImage": "old_1Small.png", "largeImage": "old_2Large.png", "originalSizeImage": "old_3Original.png"},
+    }
+    return offer
+
+
+def fake_download(monkeypatch, result=None, error=None):
+    async def _download(url):
+        if error:
+            raise error
+        return b"\x89PNG\r\n\x1a\n", "image.png", "image/png"
+
+    monkeypatch.setattr(writer, "download_image", _download)
+
+
+@pytest.mark.asyncio
+async def test_item_recreate_with_image_url_uploads_and_sends_new_main_image(monkeypatch):
+    fake_download(monkeypatch)
+    client = AsyncMock()
+    client.upload_offer_image.return_value = UPLOADED
+    client.post.return_value = FakeResponse(201, _json={"offer": {"id": "new-item"}})
+
+    link, status = await writer.recreate_offer_from_snapshot(
+        client, make_item_offer(), Decimal("1.5"), 10, 1, image_url="https://x.test/a.png"
+    )
+
+    assert link == "https://www.eldorado.gg/dashboard/offers/CustomItem/edit/new-item"
+    client.upload_offer_image.assert_awaited_once_with(b"\x89PNG\r\n\x1a\n", "image.png", "image/png")
+    sent = client.post.call_args.args[1]
+    assert sent["details"]["mainOfferImage"] == UPLOADED  # ảnh MỚI, không phải old_*
+
+
+@pytest.mark.asyncio
+async def test_item_recreate_without_image_url_keeps_old_behavior(monkeypatch):
+    fake_download(monkeypatch, error=AssertionError("không được tải ảnh khi cột Image URL trống"))
+    client = AsyncMock()
+    client.post.return_value = FakeResponse(201, _json={"offer": {"id": "new-item"}})
+
+    await writer.recreate_offer_from_snapshot(client, make_item_offer(), Decimal("1.5"), 10, 1)
+
+    client.upload_offer_image.assert_not_called()
+    sent = client.post.call_args.args[1]
+    assert sent["details"]["mainOfferImage"]["smallImage"] == "old_1Small.png"
+
+
+@pytest.mark.asyncio
+async def test_item_429_recreate_image_download_failure_keeps_old_offer(monkeypatch):
+    """Ảnh lỗi -> KHÔNG được xoá offer cũ, KHÔNG được tạo offer mới."""
+    fake_download(monkeypatch, error=ImageError("Tải ảnh thất bại (status 404) từ Image URL"))
+    client = AsyncMock()
+    client.put.side_effect = [FakeResponse(429), FakeResponse(429)]
+
+    success, message, link = await apply_update(
+        client, make_item_offer(), make_urls(), Decimal("1.5"), 10, 1,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
+        image_url="https://x.test/bad.png",
+    )
+
+    assert success is False
+    assert link is None
+    assert "lỗi ảnh" in message and "giữ nguyên" in message
+    client.delete.assert_not_called()
+    client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_item_recreate_eldorado_upload_failure_becomes_image_error(monkeypatch):
+    from eldorado_api import EldoradoApiError
+
+    fake_download(monkeypatch)
+    client = AsyncMock()
+    client.upload_offer_image.side_effect = EldoradoApiError("Upload ảnh lên Eldorado thất bại (status 500)")
+
+    with pytest.raises(ImageError, match="500"):
+        await writer.recreate_offer_from_snapshot(
+            client, make_item_offer(), Decimal("1.5"), 10, 1, image_url="https://x.test/a.png"
+        )
+    client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_non_item_offer_ignores_image_url(monkeypatch):
+    fake_download(monkeypatch, error=AssertionError("Currency không được đụng tới ảnh"))
+    client = AsyncMock()
+    client.post.return_value = FakeResponse(201, _json={"offer": {"id": "new-cur"}})
+
+    link, _ = await writer.recreate_offer_from_snapshot(
+        client, make_offer(), Decimal("0.00145"), 1000, 69, image_url="https://x.test/a.png"
+    )
+
+    assert link is not None
+    client.upload_offer_image.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_item_recreate_upload_network_error_becomes_image_error(monkeypatch):
+    import httpx
+
+    fake_download(monkeypatch)
+    client = AsyncMock()
+    client.upload_offer_image.side_effect = httpx.ReadTimeout("timeout")
+
+    with pytest.raises(ImageError, match="lỗi mạng"):
+        await writer.recreate_offer_from_snapshot(
+            client, make_item_offer(), Decimal("1.5"), 10, 1, image_url="https://x.test/a.png"
+        )
+    client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_item_create_uses_item_endpoint_and_augmented_game_payload():
+    """Bug thật 2026-09-20: code cũ POST `/me/offers` (404) với gameId/category ở
+    cấp ngoài; endpoint thật là `/me/offers/item` đòi Details + AugmentedGame."""
+    client = AsyncMock()
+    client.post.return_value = FakeResponse(201, _json={"offer": {"id": "new-item"}})
+
+    await writer.recreate_offer_from_snapshot(client, make_item_offer(), Decimal("1.5"), 10, 1)
+
+    url, payload = client.post.call_args.args
+    assert url == "https://www.eldorado.gg/api/v1/item-management/me/offers/item"
+    assert set(payload) == {"details", "augmentedGame"}
+    assert payload["augmentedGame"]["gameId"] == "g1"
+    assert payload["augmentedGame"]["category"] == "CustomItem"
+
+
+@pytest.mark.asyncio
+async def test_create_success_without_readable_id_does_not_delete_old_offer():
+    """Response 201 nhưng không có id -> KHÔNG được ghép link '.../edit/None' rồi
+    xoá offer cũ + ghi đè sheet bằng link rác."""
+    client = AsyncMock()
+    client.post.return_value = FakeResponse(201, text="{}", _json={})
+
+    link, status = await writer.create_new_offer(client, make_item_offer(), Decimal("1.5"), 10, 1)
+
+    assert link is None
+    assert status == 201
+    client.delete.assert_not_called()

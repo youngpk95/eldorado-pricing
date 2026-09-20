@@ -114,7 +114,7 @@ lại ở chu kỳ kiểm tra sau, KHÔNG bao giờ tự restart khi chưa chắ
 đã pull thành công trọn vẹn (dùng `--ff-only`, không bao giờ tự tạo merge
 commit hay đè conflict âm thầm).
 
-## Cấu trúc cột sheet (schema PHẲNG — 25 cột)
+## Cấu trúc cột sheet (schema PHẲNG — 29 cột)
 
 Không còn tham chiếu chéo tràn lan sang sheet khác như thiết kế ban đầu của
 bản gốc — mọi giá trị nằm THẲNG trong dòng sản phẩm (ngoại lệ duy nhất: 4
@@ -126,7 +126,7 @@ nghĩa DUY NHẤT nằm trong `sheet_schema.py` (tên cột nội bộ + nhãn h
 tiếng Anh ngắn gọn ở dòng 1 + chú thích chi tiết gắn vào từng ô header —
 nhân viên rê chuột vào ô header trên Google Sheets sẽ thấy giải thích đầy
 đủ). Chạy `python scripts/setup_sheet_headers.py` để tự động thiết lập đúng
-25 cột này cho 1 tab mới — script sẽ:
+29 cột này cho 1 tab mới — script sẽ:
 1. XOÁ SẠCH dữ liệu cũ trong tab (chỉ chạy khi chắc chắn muốn reset),
 2. Ghi nhãn + chú thích cho dòng 1,
 3. Đặt **checkbox thật** (Data Validation kiểu BOOLEAN) cho cột `Enabled`
@@ -142,7 +142,7 @@ cột bắt buộc), thay vì đọc nhầm dữ liệu cột khác một cách 
 thật đã gặp trước đây (chèn 4 cột `Link Sheet`/`Name Sheet`/`Cell Min`/`Cell
 Max` vào giữa bảng làm lệch mọi cột phía sau).
 
-Xem đầy đủ 25 cột + giải thích trong `sheet_schema.py` (`COLUMNS`), hoặc mở
+Xem đầy đủ 29 cột + giải thích trong `sheet_schema.py` (`COLUMNS`), hoặc mở
 sheet thật và rê chuột vào từng ô header. Tóm tắt nhanh: `Enabled` (checkbox
 bật/tắt dòng), `Name`, 3 cột tool tự ghi (`Status`/`Updated At`/`New Link`),
 `My Listing URL`/`Compare URL`, `Stock`, `Min Stock Update`, `Price Min`/`Price Max`,
@@ -161,6 +161,18 @@ xuống DƯỚI số này — còn >= số này thì bỏ qua phần stock (Pric
 Base vẫn tính/update độc lập, không bị ảnh hưởng). Port lại từ ngưỡng
 `STOCK_MIN_UP` của tool cũ, dùng để tránh gọi API update thừa khi stock vẫn
 còn dư dả.
+
+**Lưu ý về `Image URL` (chỉ offer loại Item):** khi tool tự xoá + tạo lại
+offer Item (429 hoặc 404), offer mới không tự có ảnh. Điền vào đây 1 link
+ảnh (link trực tiếp `.png`/`.jpg`/`.heic`, hoặc link Google Drive chia sẻ
+"Anyone with the link") — tool tải ảnh về bộ nhớ (không cần file trong máy,
+nên dùng được trên mọi máy chạy tool) rồi upload lên Eldorado làm ảnh chính
+(`POST /api/files/me/Offer`, gắn vào `mainOfferImage`). Ảnh phải JPEG/PNG/HEIC,
+tối đa 10MB. Link lỗi/không phải ảnh/upload thất bại -> tool DỪNG, ghi lỗi ở
+`Status` và KHÔNG xoá offer cũ. Để trống = hành vi cũ (gửi lại tên file ảnh
+của offer cũ). Cần thêm header `Image URL` vào sheet thật trước khi chạy bản
+mới (xem `SheetsClient.add_header_column`). Chưa hỗ trợ file Drive riêng tư
+chỉ share cho service account.
 
 **Lưu ý về `Relax (seconds)`:** đây là cấu hình cho CẢ VÒNG CHẠY (nghỉ sau
 khi xong HẾT sản phẩm đang bật), không phải riêng 1 sản phẩm — nếu nhiều

@@ -17,6 +17,7 @@ import offer_cache
 import pricing
 import writer
 from eldorado_api import EldoradoClient, EldoradoApiError, OfferNotFoundError
+from image_source import ImageError
 from models import OwnOffer, ProductRow
 from sheets_client import SheetsClient
 
@@ -94,6 +95,12 @@ class RowConfig:
         này; để trống = giữ hành vi cũ, luôn đồng bộ. Xem _compute_target."""
         v = self.row.get("MIN_STOCK_UPDATE")
         return _to_int(v, None) if v else None
+
+    @property
+    def image_url(self) -> str | None:
+        """Link ảnh để upload làm ảnh chính khi TẠO LẠI offer Item (xem
+        writer._upload_main_image); trống -> None = giữ hành vi cũ."""
+        return self.row.get("IMAGE_URL").strip() or None
 
     @property
     def external_sheet_link(self) -> str:
@@ -414,9 +421,14 @@ async def _recover_missing_offer(
         await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
         return
 
-    new_link, create_status = await writer.recreate_offer_from_snapshot(
-        client, snapshot_offer, new_price, new_stock, new_min_qty
-    )
+    try:
+        new_link, create_status = await writer.recreate_offer_from_snapshot(
+            client, snapshot_offer, new_price, new_stock, new_min_qty, image_url=cfg.image_url
+        )
+    except ImageError as e:
+        note_lines.insert(0, f"❌ Offer đã bị xoá, tự tạo lại THẤT BẠI do lỗi ảnh: {e} — sửa Image URL rồi tool sẽ thử lại ở chu kỳ sau.")
+        await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
+        return
     if not new_link:
         note_lines.insert(0, f"❌ Offer đã bị xoá, tự tạo lại THẤT BẠI (status {create_status}) — cần tự tạo lại tay.")
         await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
@@ -476,6 +488,7 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
             client, offer, urls, new_price, new_stock, new_min_qty,
             price_changed=update_price, only_price_changed=only_price_changed,
             allow_create_new=True, create_new_enabled=cfg.create_new_enabled,
+            image_url=cfg.image_url,
         )
         if link:
             # apply_update trả link nghĩa là VỪA xoá + tạo lại offer mới do

@@ -40,7 +40,15 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("TITLE_EXCLUDE_KEYWORDS", "Exclude Keywords", "Loại đối thủ có tiêu đề offer chứa BẤT KỲ từ khoá nào ở đây (cách nhau bằng dấu ;, không phân biệt hoa/thường). Để trống nếu không lọc."),
     ("TITLE_REQUIRE_KEYWORDS", "Require Keywords", "Chỉ giữ đối thủ có tiêu đề offer chứa ÍT NHẤT 1 từ khoá ở đây (cách nhau bằng dấu ;, không phân biệt hoa/thường). Để trống = không bắt buộc, giữ hết."),
     ("ALLOW_RECREATE_ON_RATE_LIMIT", "Allow Recreate on Rate Limit", "Tích: cho phép tool tự xoá + tạo lại offer khi Eldorado báo lỗi quá tải (429), VÀ tự tạo lại offer (từ dữ liệu backup) khi phát hiện offer đã bị xoá mất (404) — tự cập nhật luôn My Listing URL sang offer mới. Bỏ tích: tool chỉ báo lỗi ở Status, không tự xoá/tạo/tạo lại gì cả."),
+    ("IMAGE_URL", "Image URL", "CHỈ áp dụng cho offer loại Item: link ảnh (trực tiếp .png/.jpg/.heic, hoặc link Google Drive chia sẻ 'Anyone with the link') để tool UPLOAD làm ảnh chính mỗi khi tự tạo lại offer (429/404) — ảnh tải về rồi upload thẳng, không cần lưu file trong máy. Ảnh phải JPEG/PNG/HEIC, tối đa 10MB. Nếu link lỗi/không phải ảnh, tool DỪNG, báo lỗi ở Status và KHÔNG xoá offer cũ. Để TRỐNG = giữ hành vi cũ (gửi lại ảnh của offer cũ, có thể mất ảnh nếu Eldorado xoá file cùng offer cũ)."),
     ("RELAX_SECONDS", "Relax (seconds)", "Số giây NGHỈ sau khi chạy xong HẾT TẤT CẢ sản phẩm đang bật, trước khi bắt đầu vòng chạy tiếp theo — đây là cấu hình cho CẢ VÒNG CHẠY, không phải riêng sản phẩm này. Nếu nhiều sản phẩm đang bật có số khác nhau, tool lấy số LỚN NHẤT. Để trống = dùng mặc định trong .env (LOOP_DELAY_SECONDS)."),
 ]
 
 INTERNAL_KEYS: list[str] = [key for key, _, _ in COLUMNS]
+
+# Cột KHÔNG bắt buộc phải có header trên sheet thật: thiếu header thì coi như
+# cột đó luôn TRỐNG (không làm hỏng việc đọc sheet). Chỉ dành cho cột thêm sau
+# và chỉ dùng ở 1 nhánh hiếm (vd IMAGE_URL — chỉ khi tạo lại offer Item), để
+# tool tự cập nhật lên máy nào chưa kịp thêm header vẫn KHÔNG dừng reprice mọi
+# dòng (cùng loại sự cố schema 2026-09-14).
+OPTIONAL_KEYS: frozenset[str] = frozenset({"IMAGE_URL"})
