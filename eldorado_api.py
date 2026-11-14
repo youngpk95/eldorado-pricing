@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
+from collections import deque
 from decimal import Decimal
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
@@ -279,6 +281,55 @@ class OfferNotFoundError(EldoradoApiError):
     snapshot đã lưu (xem offer_cache.py) thay vì chỉ báo lỗi bắt sửa tay."""
 
 
+class WriteStats:
+    """Đếm lệnh GHI lên Eldorado (PUT/POST/DELETE) trong 60 phút gần nhất —
+    để biết tài khoản bắt đầu bị 429 "Quota exceeded" ở mức bao nhiêu lệnh
+    ghi (2026-11-14). Chỉ đếm trong tiến trình này: các máy/tool KHÁC dùng
+    chung tài khoản cũng tiêu chung quota nhưng không nằm trong số này."""
+
+    WINDOW_SECONDS = 3600
+
+    def __init__(self) -> None:
+        self._events: deque[tuple[float, str, int]] = deque()
+        self._in_429 = False
+
+    def _trim(self, now: float) -> None:
+        while self._events and self._events[0][0] < now - self.WINDOW_SECONDS:
+            self._events.popleft()
+
+    def record(self, method: str, status: int, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        self._events.append((now, method, status))
+        self._trim(now)
+        if status == 429 and not self._in_429:
+            self._in_429 = True
+            logger.warning("[ghi] BẮT ĐẦU bị 429 — %s", self.summary(now))
+        elif status != 429 and self._in_429:
+            self._in_429 = False
+            logger.info("[ghi] Hết bị 429 (lệnh %s trả %s) — %s", method, status, self.summary(now))
+
+    def counts(self, now: float | None = None) -> dict[str, int]:
+        now = time.time() if now is None else now
+        self._trim(now)
+        last10 = [e for e in self._events if e[0] >= now - 600]
+        return {
+            "60m": len(self._events),
+            "60m_429": sum(1 for e in self._events if e[2] == 429),
+            "10m": len(last10),
+            "10m_429": sum(1 for e in last10 if e[2] == 429),
+        }
+
+    def summary(self, now: float | None = None) -> str:
+        c = self.counts(now)
+        return (
+            f"lệnh ghi Eldorado: {c['60m']} trong 60 phút ({c['60m_429']} bị 429), "
+            f"{c['10m']} trong 10 phút ({c['10m_429']} bị 429)"
+        )
+
+
+write_stats = WriteStats()
+
+
 class EldoradoClient:
     def __init__(self, get_cookie) -> None:
         self._get_cookie = get_cookie  # async callable () -> str
@@ -362,12 +413,16 @@ class EldoradoClient:
     async def put(self, url: str, payload: dict) -> httpx.Response:
         await self._pace_write()
         headers = await self._headers(content_type=True)
-        return await self._http.put(url, headers=headers, json=payload)
+        resp = await self._http.put(url, headers=headers, json=payload)
+        write_stats.record("PUT", resp.status_code)
+        return resp
 
     async def post(self, url: str, payload: dict) -> httpx.Response:
         await self._pace_write()
         headers = await self._headers(content_type=True)
-        return await self._http.post(url, headers=headers, json=payload)
+        resp = await self._http.post(url, headers=headers, json=payload)
+        write_stats.record("POST", resp.status_code)
+        return resp
 
     async def upload_offer_image(self, data: bytes, filename: str, content_type: str) -> dict[str, str]:
         """Upload 1 ảnh offer (multipart, field `image`) — trả về dict
@@ -376,6 +431,7 @@ class EldoradoClient:
         await self._pace_write()
         headers = await self._headers()
         resp = await self._http.post(IMAGE_UPLOAD_URL, headers=headers, files={"image": (filename, data, content_type)})
+        write_stats.record("UPLOAD", resp.status_code)
         if resp.status_code != 200:
             raise EldoradoApiError(f"Upload ảnh lên Eldorado thất bại (status {resp.status_code}) — {resp.text[:200]}")
         try:
@@ -387,7 +443,9 @@ class EldoradoClient:
     async def delete(self, url: str) -> httpx.Response:
         await self._pace_write()
         headers = await self._headers(content_type=True)
-        return await self._http.delete(url, headers=headers)
+        resp = await self._http.delete(url, headers=headers)
+        write_stats.record("DELETE", resp.status_code)
+        return resp
 
 
 def filter_competitors(

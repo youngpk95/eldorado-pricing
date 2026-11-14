@@ -195,3 +195,21 @@ def test_filter_competitors_defaults_to_no_keyword_filtering():
         RAW, blacklist=set(), min_stock=None, min_feedback=None, tile_feedback=None, floor_price=None
     )
     assert sorted(m.seller for m in qualifying) == ["A", "B", "C"]
+
+
+def test_write_stats_counts_window_and_logs_429_transitions(caplog):
+    """Mục 4 (2026-11-14): đếm lệnh ghi 60/10 phút + log lúc BẮT ĐẦU/HẾT bị 429."""
+    import logging
+    from eldorado_api import WriteStats
+    ws = WriteStats()
+    with caplog.at_level(logging.INFO):
+        ws.record("PUT", 200, now=0)            # rơi khỏi cửa sổ 60 phút
+        ws.record("PUT", 200, now=3000)
+        ws.record("PUT", 429, now=3500)
+        ws.record("PUT", 429, now=3550)         # vẫn đang 429 -> không log lại
+        ws.record("PUT", 200, now=3700)
+    c = ws.counts(now=3700)
+    assert c == {"60m": 4, "60m_429": 2, "10m": 3, "10m_429": 2}
+    msgs = [r.getMessage() for r in caplog.records]
+    assert sum("BẮT ĐẦU bị 429" in m for m in msgs) == 1
+    assert sum("Hết bị 429" in m for m in msgs) == 1

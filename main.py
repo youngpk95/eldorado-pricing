@@ -25,7 +25,7 @@ if sys.stderr.encoding != "utf-8":
 import config
 import updater
 from eldo_auth import EldoradoAuth
-from eldorado_api import EldoradoClient
+from eldorado_api import EldoradoClient, write_stats
 from models import ProductRow
 from product_pipeline import RowConfig, process_product
 from sheets_client import SheetsClient, extract_spreadsheet_id
@@ -241,7 +241,7 @@ async def main() -> None:
             except Exception:
                 logger.exception("Lỗi ở 1 chu kỳ chạy — bỏ qua, thử lại chu kỳ sau.")
             elapsed = asyncio.get_event_loop().time() - started
-            logger.info("Hoàn tất 1 chu kỳ trong %.1fs. Nghỉ %ss...", elapsed, loop_delay)
+            logger.info("Hoàn tất 1 chu kỳ trong %.1fs. Nghỉ %ss... | %s", elapsed, loop_delay, write_stats.summary())
 
             now = asyncio.get_event_loop().time()
             if now - last_update_check >= config.UPDATE_CHECK_INTERVAL_SECONDS:
