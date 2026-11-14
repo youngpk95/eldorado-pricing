@@ -93,3 +93,84 @@ def mark_pending_link(row_index: int, link: str) -> None:
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except (OSError, json.JSONDecodeError) as e:
         logger.warning("[cache] Không đánh dấu pending link dòng %s: %s", row_index, e)
+
+
+# ---------------------------------------------------------------------------
+# Tạm dừng TẠO offer mới khi Eldorado báo hết quota (dùng chung mọi dòng)
+# ---------------------------------------------------------------------------
+# Bug thật đã gặp (2026-11-14, sheet "Eldo D4 V3", dòng "Mirror COU"): POST tạo
+# offer trả 429 "Whoa! Calm down, cowboy! Quota exceeded" — quota tạo offer tính
+# cho CẢ tài khoản/client của tool, không theo từng dòng. Tool cứ mỗi chu kỳ
+# (~45s) lại POST tạo lại cho 2 dòng bị 404 -> quota không bao giờ hồi. Lưu mốc
+# "chặn tới lúc nào" ra FILE (không chỉ trong RAM) để tool khởi động lại /
+# tự cập nhật cũng không POST lại ngay.
+
+def _cooldown_path() -> Path:
+    return CACHE_DIR / "create_cooldown.json"
+
+
+def _read_create_state() -> dict[str, Any]:
+    path = _cooldown_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("[cache] Không đọc được create_cooldown.json: %s", e)
+        return {}
+
+
+def _write_create_state(data: dict[str, Any]) -> None:
+    try:
+        CACHE_DIR.mkdir(exist_ok=True)
+        _cooldown_path().write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        logger.warning("[cache] Không ghi được create_cooldown.json: %s", e)
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_create_cooldown_until(now: float) -> float | None:
+    """Trả về mốc epoch (giây) đang chặn tạo offer, None nếu không bị chặn."""
+    until = _as_float(_read_create_state().get("until"))
+    return until if until > now else None
+
+
+def record_create_429(now: float, base: float, cap: float, retry_after: float | None, reason: str) -> float:
+    """Ghi nhận 1 lần TẠO offer bị 429 liên tiếp -> trả về mốc được thử lại.
+    Chờ tăng dần base * 2^(số lần 429 liên tiếp - 1), tối đa `cap`; nếu
+    Eldorado gửi Retry-After thì dùng đúng giá trị đó. `reason` = body 429,
+    chỉ để mở file ra xem tay khi cần chẩn đoán."""
+    data = _read_create_state()
+    fails = int(_as_float(data.get("fail_count"))) + 1
+    wait = retry_after if retry_after is not None else min(cap, base * 2 ** (fails - 1))
+    until = now + wait
+    data.update({"until": until, "fail_count": fails, "reason": reason})
+    _write_create_state(data)
+    return until
+
+
+def record_create_success() -> None:
+    """Tạo offer thành công -> Eldorado đã cho tạo lại, xoá ngay mọi chờ."""
+    data = _read_create_state()
+    if data.get("until") or data.get("fail_count"):
+        data.update({"until": 0, "fail_count": 0, "reason": None})
+        _write_create_state(data)
+
+
+def get_last_create_at() -> float:
+    """Mốc lần GỬI POST tạo offer gần nhất — lưu file để khởi động lại / tự
+    cập nhật cũng không tạo dồn ngay (xem writer._reserve_create_slot)."""
+    return _as_float(_read_create_state().get("last_create_at"))
+
+
+def set_last_create_at(ts: float) -> None:
+    data = _read_create_state()
+    data["last_create_at"] = ts
+    _write_create_state(data)

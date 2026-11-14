@@ -425,12 +425,16 @@ async def _recover_missing_offer(
         new_link, create_status = await writer.recreate_offer_from_snapshot(
             client, snapshot_offer, new_price, new_stock, new_min_qty, image_url=cfg.image_url
         )
+    except writer.CreateCooldownError as e:
+        note_lines.insert(0, f"⏳ Offer đã bị xoá — CHƯA tạo lại: {e}. Cần bán gấp thì tạo tay rồi dán link vào My Listing URL.")
+        await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
+        return
     except ImageError as e:
         note_lines.insert(0, f"❌ Offer đã bị xoá, tự tạo lại THẤT BẠI do lỗi ảnh: {e} — sửa Image URL rồi tool sẽ thử lại ở chu kỳ sau.")
         await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
         return
     if not new_link:
-        note_lines.insert(0, f"❌ Offer đã bị xoá, tự tạo lại THẤT BẠI (status {create_status}) — cần tự tạo lại tay.")
+        note_lines.insert(0, f"❌ Offer đã bị xoá, tự tạo lại THẤT BẠI (status {create_status}){writer.create_failure_hint(create_status)} — cần bán gấp thì tạo tay.")
         await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
         return
 
@@ -500,7 +504,7 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
             # đây chính là bug thật đã gặp (dòng "Mirror COTA", 2026-09-13),
             # thiếu bước này thì luồng 404 vẫn có thể tạo offer trùng.
             await _mark_pending_link(row.index, link)
-        note_lines.insert(0, ("✅ " if success else "❌ ") + message)
+        note_lines.insert(0, message if message.startswith("⏳") else ("✅ " if success else "❌ ") + message)
         # cfg.own_listing_url là URL CŨ đọc từ đầu chu kỳ, vẫn đúng để đối
         # chiếu dòng vật lý — `link` (nếu có) chỉ dùng để ghi đè cột My
         # Listing URL sang offer mới, xem write_result.

@@ -670,3 +670,29 @@ def test_row_config_title_keyword_filters_empty_by_default():
 
     assert cfg.title_exclude_keywords == set()
     assert cfg.title_require_keywords == set()
+
+
+@pytest.mark.asyncio
+async def test_process_product_recovery_waits_while_create_quota_blocked(monkeypatch, tmp_path):
+    """Bug thật 2026-11-14 ("Mirror COU"): offer 404, Eldorado đang chặn tạo
+    offer (Quota exceeded) — KHÔNG được POST lại mỗi chu kỳ (làm quota không
+    bao giờ hồi), chỉ báo đang chờ trên Status."""
+    import time
+    monkeypatch.setattr(config, "DRY_RUN", False)
+    monkeypatch.setattr(offer_cache, "CACHE_DIR", tmp_path)
+    row = make_row(ALLOW_RECREATE_ON_RATE_LIMIT="1")
+    offer_cache.save_snapshot(row.index, row.get("OWN_LISTING_URL"), make_own_offer())
+    offer_cache.record_create_429(time.time(), 600, 900, None, "Quota exceeded")
+
+    client = AsyncMock()
+    client.get_own_offer.side_effect = OfferNotFoundError("Không tìm thấy ID sản phẩm")
+    client.get_competitors.return_value = []
+
+    sheets = FakeSheets()
+    await process_product(row, sheets, client)
+
+    client.post.assert_not_called()
+    _, note, link, _ = sheets.writes[0]
+    assert link is None
+    assert "CHƯA tạo lại" in note
+    assert "Eldorado đang chặn tạo offer" in note

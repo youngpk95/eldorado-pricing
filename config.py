@@ -74,6 +74,14 @@ CONCURRENCY_LIMIT = int(_get("CONCURRENCY_LIMIT", "5"))
 LOOP_DELAY_SECONDS = float(_get("LOOP_DELAY_SECONDS", "30"))
 PRODUCT_DELAY_SECONDS = float(_get("PRODUCT_DELAY_SECONDS", "1"))
 ELDORADO_WRITE_DELAY_MS = float(_get("ELDORADO_WRITE_DELAY_MS", "300"))
+# TẠO offer bị 429 -> chờ tăng dần trước lần tạo kế tiếp (mọi dòng dùng chung):
+# BASE, 2xBASE, 4xBASE... tối đa MAX; tạo thành công 1 lần là xoá chờ ngay.
+# Eldorado gửi Retry-After thì làm theo Retry-After. Xem writer._post_new_offer.
+CREATE_BACKOFF_BASE_SECONDS = float(_get("ELDORADO_CREATE_BACKOFF_BASE_SECONDS", "60"))
+CREATE_BACKOFF_MAX_SECONDS = float(_get("ELDORADO_CREATE_BACKOFF_MAX_SECONDS", "900"))
+# Khoảng cách tối thiểu giữa 2 lần TẠO offer (mọi dòng dùng chung) — tool tạo
+# dồn dập (2 offer cách nhau <1s mỗi chu kỳ) là nguyên nhân bị chặn 2026-11-14.
+CREATE_MIN_INTERVAL_SECONDS = float(_get("ELDORADO_CREATE_MIN_INTERVAL_SECONDS", "60"))
 ELDORADO_TIMEOUT_SECONDS = float(_get("ELDORADO_TIMEOUT_SECONDS", "20"))
 
 DRY_RUN = _get("DRY_RUN", "true").strip().lower() != "false"

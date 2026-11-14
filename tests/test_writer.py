@@ -1,8 +1,8 @@
 """Test luồng xử lý 429 (quá tải) của writer.apply_update — giả lập response
 HTTP, KHÔNG gọi Eldorado thật (không có cách nào an toàn/hợp lệ để cố tình
-làm tài khoản thật bị 429). Theo xác nhận trực tiếp từ user (2026-09-13):
-tạo offer MỚI không bao giờ bị 429 (chỉ endpoint đổi giá/update mới bị) —
-nên chỉ cần đúng 1 lần tạo, không có retry loop."""
+làm tài khoản thật bị 429). Giả định cũ (2026-09-13) "tạo offer MỚI không bao
+giờ bị 429" đã SAI — 2026-11-14 POST tạo offer bị 429 "Quota exceeded" do
+tool tạo dồn dập; xem các test giãn cách/tạm dừng tạo ở cuối file."""
 import sys
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -334,3 +334,155 @@ async def test_create_success_without_readable_id_does_not_delete_old_offer():
     assert link is None
     assert status == 201
     client.delete.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Giãn cách + tạm dừng TẠO offer (bug thật 2026-11-14, "Mirror COU")
+# ---------------------------------------------------------------------------
+QUOTA_BODY = '{"code":429,"messages":["Whoa! Calm down, cowboy! Quota exceeded. Please try again later."]}'
+
+
+@pytest.mark.asyncio
+async def test_create_429_quota_sets_cooldown_and_blocks_next_create_without_deleting():
+    import offer_cache
+    import writer
+    client = AsyncMock()
+    client.put.side_effect = [FakeResponse(429), FakeResponse(429)]
+    client.delete.return_value = FakeResponse(200)
+    client.post.return_value = FakeResponse(429, text=QUOTA_BODY)
+
+    success, message, _ = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
+    )
+    assert success is False
+    assert "429" in message and "tạm dừng tạo lại" in message
+    assert offer_cache.get_create_cooldown_until(__import__("time").time()) is not None
+
+    # Lần sau (dù đã qua giãn cách) vẫn bị chặn vì hết quota -> KHÔNG xoá, KHÔNG POST.
+    offer_cache.set_last_create_at(0.0)
+    client.reset_mock()
+    client.put.side_effect = [FakeResponse(429), FakeResponse(429)]
+    success, message, link = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
+    )
+    assert success is False and link is None
+    assert "offer cũ được giữ nguyên" in message
+    client.delete.assert_not_called()
+    client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_second_create_within_min_interval_is_deferred_without_deleting():
+    """Đúng tình huống log: 2 dòng cùng cần tạo lại trong 1 chu kỳ -> chỉ dòng
+    đầu được tạo, dòng sau phải chờ (không xoá offer cũ)."""
+    import writer
+    client = AsyncMock()
+    client.delete.return_value = FakeResponse(200)
+    client.post.return_value = FakeResponse(201, _json={"id": "new-1"})
+
+    link1, _ = await writer.create_new_offer(client, make_offer(), Decimal("1"), 10, 1)
+    assert link1 is not None
+
+    client.reset_mock()
+    with pytest.raises(writer.CreateCooldownError):
+        await writer.create_new_offer(client, make_offer(), Decimal("1"), 10, 1)
+    client.delete.assert_not_called()
+    client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_allowed_again_after_min_interval(monkeypatch):
+    import writer
+    client = AsyncMock()
+    client.post.return_value = FakeResponse(201, _json={"id": "new-1"})
+    await writer.recreate_offer_from_snapshot(client, make_offer(), Decimal("1"), 10, 1)
+    import offer_cache
+    offer_cache.set_last_create_at(offer_cache.get_last_create_at() - writer.config.CREATE_MIN_INTERVAL_SECONDS - 1)
+    link, _ = await writer.recreate_offer_from_snapshot(client, make_offer(), Decimal("1"), 10, 1)
+    assert link is not None
+    assert client.post.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_full_update_429_falls_back_to_change_price_without_recreate():
+    """User xác nhận 2026-11-14: trang sửa offer (update đầy đủ) bị 429 nhưng ô
+    đổi giá ngoài danh sách (changePrice) vẫn được -> phải thử changePrice
+    trước, KHÔNG xoá + tạo lại."""
+    client = AsyncMock()
+    client.put.side_effect = [FakeResponse(429), FakeResponse(200)]
+
+    success, message, link = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00145"), 5, 69,
+        price_changed=True, only_price_changed=False, allow_create_new=True, create_new_enabled=True,
+    )
+
+    assert success is True and link is None
+    assert [c.args[0] for c in client.put.call_args_list] == ["https://api/update", "https://api/change"]
+    assert "stock/minQty CHƯA cập nhật" in message
+    client.delete.assert_not_called()
+    client.post.assert_not_called()
+
+
+def test_create_backoff_grows_exponentially_and_caps():
+    import offer_cache
+    waits = [offer_cache.record_create_429(1000.0, 60, 900, None, "q") - 1000.0 for _ in range(6)]
+    assert waits == [60, 120, 240, 480, 900, 900]
+
+
+def test_create_backoff_uses_retry_after_when_given():
+    import offer_cache
+    assert offer_cache.record_create_429(1000.0, 60, 900, 7.0, "q") == 1007.0
+
+
+@pytest.mark.asyncio
+async def test_create_success_clears_backoff_immediately():
+    import time
+    import offer_cache
+    import writer
+    offer_cache.record_create_429(time.time() - 1000, 60, 900, None, "q")
+    offer_cache.record_create_429(time.time() - 1000, 60, 900, None, "q")
+    client = AsyncMock()
+    client.post.return_value = FakeResponse(201, _json={"id": "new-1"})
+    link, _ = await writer.recreate_offer_from_snapshot(client, make_offer(), Decimal("1"), 10, 1)
+    assert link is not None
+    # Lần 429 kế tiếp phải bắt đầu lại từ mức chờ ngắn nhất, không cộng dồn.
+    assert offer_cache.record_create_429(0.0, 60, 900, None, "q") == 60.0
+
+
+@pytest.mark.asyncio
+async def test_first_create_429_waits_only_base_seconds():
+    import time
+    import offer_cache
+    import writer
+    client = AsyncMock()
+    client.post.return_value = FakeResponse(429, text="Too Many Requests")
+    before = time.time()
+    await writer.recreate_offer_from_snapshot(client, make_offer(), Decimal("1"), 10, 1)
+    until = offer_cache.get_create_cooldown_until(time.time())
+    assert until is not None
+    assert until - before <= writer.config.CREATE_BACKOFF_BASE_SECONDS + 1
+
+
+@pytest.mark.asyncio
+async def test_image_error_before_post_releases_create_slot(monkeypatch):
+    """Lỗi ảnh xảy ra TRƯỚC khi gửi POST -> không được chiếm lượt tạo của dòng khác."""
+    import offer_cache
+    import writer
+    from image_source import ImageError
+
+    async def boom(*a, **k):
+        raise ImageError("ảnh hỏng")
+    monkeypatch.setattr(writer, "_upload_main_image", boom)
+    item = make_offer()
+    item = OwnOffer(**{**item.__dict__, "offer_type": "CustomItem", "category": "CustomItem"})
+
+    client = AsyncMock()
+    with pytest.raises(ImageError):
+        await writer.recreate_offer_from_snapshot(client, item, Decimal("1"), 10, 1, image_url="https://x/y.png")
+    assert offer_cache.get_last_create_at() == 0.0
+
+    client.post.return_value = FakeResponse(201, _json={"id": "new-2"})
+    link, _ = await writer.recreate_offer_from_snapshot(client, make_offer(), Decimal("1"), 10, 1)
+    assert link is not None

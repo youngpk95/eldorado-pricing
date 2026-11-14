@@ -9,10 +9,14 @@ endpoint update đầy đủ; nếu giá KHÔNG đổi (chỉ stock/thời gian/
 cần endpoint update đầy đủ.
 
 Khi gặp 429 (quá tải), fallback sang xoá + tạo lại offer VỚI GIÁ MỚI luôn
-(không phải tạo lại giá cũ rồi đổi giá sau). Theo xác nhận trực tiếp từ user
-(2026-09-13): tạo offer MỚI không bao giờ bị 429 (chỉ endpoint đổi
-giá/update mới bị) — nên chỉ cần đúng 1 lần tạo là xong, KHÔNG cần retry
-loop. Nếu chu kỳ SAU vẫn gặp 429 khi đổi giá (vì offer vừa tạo lại cũng cũ
+(không phải tạo lại giá cũ rồi đổi giá sau). Giả định cũ (2026-09-13) "tạo
+offer MỚI không bao giờ bị 429" đã SAI: 2026-11-14 POST tạo offer trả 429
+"Whoa! Calm down, cowboy! Quota exceeded" do tool tạo dồn dập. Khi đó tool
+chờ tăng dần (60s, 2, 4, 8 phút... tối đa 15 phút, hoặc theo Retry-After —
+offer_cache.record_create_429), tạo được 1 lần là hết chờ ngay; trong lúc
+chờ KHÔNG xoá/tạo lại offer nào; ngoài ra mọi lần tạo cách nhau tối
+thiểu CREATE_MIN_INTERVAL_SECONDS — xem _reserve_create_slot. Vẫn
+không retry ngay trong cùng chu kỳ. Nếu chu kỳ SAU vẫn gặp 429 khi đổi giá (vì offer vừa tạo lại cũng cũ
 đi theo thời gian), `product_pipeline.py` sẽ tự lặp lại đúng luồng này —
 xoá + tạo lại lần nữa với giá mới nhất tại thời điểm đó. Vì offer mới có ID
 khác hẳn, sheet phải tự cập nhật lại `My Listing URL` (cột F) sang link mới
@@ -20,13 +24,17 @@ khác hẳn, sheet phải tự cập nhật lại `My Listing URL` (cột F) san
 xoá."""
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
+import time
+from datetime import datetime
 from decimal import Decimal
 
 import httpx
 
 import config
+import offer_cache
 from eldorado_api import EldoradoApiError, EldoradoClient, resolve_attribute_value_id
 from image_source import ImageError, download_image
 from models import OfferUrls, OwnOffer
@@ -121,6 +129,18 @@ async def apply_update(
         responses.append(resp_full)
         if resp_full.status_code == 200:
             return True, "Cập nhật thành công (đầy đủ: giá/stock/minQty)", None
+        # User xác nhận 2026-11-14: khi trang sửa offer (update đầy đủ) bị 429
+        # "Calm down", ô đổi giá ở danh sách offer (changePrice — đúng endpoint
+        # urls.change) vẫn đổi được. Nên ưu tiên đổi GIÁ trước (quan trọng nhất)
+        # thay vì nhảy thẳng sang xoá + tạo lại; stock/minQty để chu kỳ sau.
+        if resp_full.status_code == 429 and price_changed:
+            resp_price = await client.put(urls.change, price_only_payload)
+            responses.append(resp_price)
+            if resp_price.status_code == 200:
+                return True, (
+                    "Đổi giá thành công (change price) — stock/minQty CHƯA cập nhật vì update đầy đủ "
+                    "bị 429, chu kỳ sau thử lại"
+                ), None
 
     is_429 = any(r.status_code == 429 for r in responses)
     status_summary = ", ".join(f"{r.status_code}" for r in responses)
@@ -128,19 +148,96 @@ async def apply_update(
         body_texts = "; ".join(r.text[:200] for r in responses)
         return False, f"Cập nhật thất bại (status: {status_summary}) — {body_texts}", None
 
-    # 429 -> xoá + tạo lại VỚI GIÁ MỚI. Tạo offer mới không bị 429 (xác nhận
-    # từ user) nên chỉ cần đúng 1 lần thử — không cần retry loop.
+    # 429 -> xoá + tạo lại VỚI GIÁ MỚI, đúng 1 lần thử — không retry loop.
     try:
         new_link, create_status = await create_new_offer(
             client, offer, new_price, new_qty, new_min_qty, image_url=image_url
         )
+    except CreateCooldownError as e:
+        # Chặn TRƯỚC khi xoá gì -> offer cũ còn nguyên, chu kỳ sau thử đổi giá lại.
+        return False, f"⏳ 429 khi đổi giá — KHÔNG xoá + tạo lại vì {e} (offer cũ được giữ nguyên)", None
     except ImageError as e:
         # Lỗi ảnh xảy ra TRƯỚC khi xoá bất cứ gì (xem create_new_offer) -> offer
         # cũ còn nguyên, chỉ là chưa đổi được giá/stock do 429.
         return False, f"429 rate-limit -> KHÔNG tạo lại offer vì lỗi ảnh: {e} (offer cũ được giữ nguyên)", None
     if new_link:
         return True, "429 rate-limit -> xoá + tạo offer mới thành công", new_link
-    return False, f"429 rate-limit -> tạo offer mới cũng thất bại (status {create_status})", None
+    return False, f"429 rate-limit -> tạo offer mới cũng thất bại (status {create_status}){create_failure_hint(create_status)}", None
+
+
+class CreateCooldownError(Exception):
+    """Chưa được phép TẠO offer lúc này (Eldorado báo hết quota, hoặc chưa đủ
+    giãn cách giữa 2 lần tạo) — ném ra TRƯỚC khi xoá/upload/POST bất cứ gì,
+    để người gọi giữ nguyên offer cũ và để chu kỳ sau thử lại."""
+
+    def __init__(self, until: float, reason: str) -> None:
+        self.until = until
+        super().__init__(f"{reason}, tool tự thử lại sau {_hhmm(until)}")
+
+
+def _hhmm(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).strftime("%H:%M:%S")
+
+
+# Giãn cách giữa 2 lần TẠO offer, dùng chung MỌI dòng (mốc lưu file, xem
+# offer_cache.get_last_create_at). Bug thật 2026-11-14: 2 dòng xử lý song song
+# POST tạo offer cách nhau 0.6s, chu kỳ nào cũng lặp lại -> Eldorado trả 429
+# "Quota exceeded". Lock để 2 dòng chạy song song (asyncio.gather) không cùng
+# lọt qua bước kiểm tra; tạo lại lock nếu event loop đổi (asyncio.Lock gắn
+# với loop đầu tiên phải chờ nó).
+_create_lock: asyncio.Lock | None = None
+_create_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_create_lock() -> asyncio.Lock:
+    global _create_lock, _create_lock_loop
+    loop = asyncio.get_running_loop()
+    if _create_lock is None or _create_lock_loop is not loop:
+        _create_lock, _create_lock_loop = asyncio.Lock(), loop
+    return _create_lock
+
+
+async def _reserve_create_slot() -> float:
+    """Giữ chỗ cho 1 lần tạo offer: kiểm tra (1) đang bị chặn do 429 khi tạo,
+    (2) lần tạo gần nhất chưa đủ CREATE_MIN_INTERVAL_SECONDS. Hợp lệ thì ghi
+    nhận NGAY mốc tạo rồi mới cho đi tiếp. Trả về mốc CŨ để _release_create_slot
+    trả lại lượt nếu rốt cuộc không gửi POST (lỗi ảnh, category lạ)."""
+    async with _get_create_lock():
+        now = time.time()
+        until = offer_cache.get_create_cooldown_until(now)
+        if until is not None:
+            raise CreateCooldownError(until, "Eldorado đang chặn tạo offer (429)")
+        previous = offer_cache.get_last_create_at()
+        next_allowed = previous + config.CREATE_MIN_INTERVAL_SECONDS
+        if now < next_allowed:
+            raise CreateCooldownError(next_allowed, "vừa tạo offer khác chưa lâu (giãn cách để tránh bị Eldorado chặn)")
+        offer_cache.set_last_create_at(now)
+        return previous
+
+
+def _release_create_slot(previous: float) -> None:
+    offer_cache.set_last_create_at(previous)
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    """Header Retry-After (dạng số giây) nếu Eldorado có gửi; dạng ngày giờ
+    hoặc giá trị lạ thì bỏ qua (dùng chờ tăng dần)."""
+    headers = getattr(resp, "headers", None) or {}
+    try:
+        value = float(headers.get("Retry-After", ""))
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value <= 24 * 3600 else None
+
+
+def create_failure_hint(status: int | None) -> str:
+    """Đuôi giải thích thêm cho Status khi tạo offer thất bại — 429 nghĩa là
+    hết quota tạo offer (đã bật tạm dừng ở _post_new_offer)."""
+    if status != 429:
+        return ""
+    until = offer_cache.get_create_cooldown_until(time.time())
+    when = f" tới {_hhmm(until)}" if until else ""
+    return f" — Eldorado chặn tạo offer (429), tool tạm dừng tạo lại{when}"
 
 
 def _delete_url_for_category(otype: str, offer_id: str) -> str:
@@ -166,6 +263,9 @@ async def create_new_offer(
     trước/sau tuỳ category, giữ đúng như bản gốc. Trả về (link offer mới
     hoặc None, status code của chính request tạo — None nếu lỗi xảy ra
     trước khi kịp gọi request)."""
+    # Đang bị chặn tạo offer -> dừng NGAY, trước khi xoá offer cũ (Currency
+    # xoá trước rồi mới tạo — POST chắc chắn 429 thì sẽ mất trắng offer).
+    previous_slot = await _reserve_create_slot()
     otype = offer.offer_type or offer.category
     url_del = _delete_url_for_category(otype, offer.offer_id)
     should_delete_before = otype in ("Currency", "TopUp", "GiftCard")
@@ -178,7 +278,7 @@ async def create_new_offer(
         except Exception as e:
             logger.error("[create_new] Lỗi xoá offer cũ trước: %s", e)
 
-    new_url, status = await _post_new_offer(client, offer, new_price, new_qty, new_min_qty, image_url)
+    new_url, status = await _post_with_slot(previous_slot, client, offer, new_price, new_qty, new_min_qty, image_url)
 
     if new_url and not should_delete_before:
         try:
@@ -204,7 +304,21 @@ async def recreate_offer_from_snapshot(
     xoá — xem product_pipeline.py._recover_missing_offer). KHÁC
     `create_new_offer` ở trên: KHÔNG gọi delete, vì offer gốc đã mất từ
     trước, không còn gì để xoá thêm."""
-    return await _post_new_offer(client, offer, new_price, new_qty, new_min_qty, image_url)
+    previous_slot = await _reserve_create_slot()
+    return await _post_with_slot(previous_slot, client, offer, new_price, new_qty, new_min_qty, image_url)
+
+
+async def _post_with_slot(previous_slot: float, client: EldoradoClient, *args, **kwargs) -> tuple[str | None, int | None]:
+    """Gọi _post_new_offer; nếu KHÔNG kịp gửi POST (lỗi ảnh -> ImageError, hoặc
+    category lạ -> status None) thì trả lại lượt tạo cho dòng khác."""
+    try:
+        new_url, status = await _post_new_offer(client, *args, **kwargs)
+    except ImageError:
+        _release_create_slot(previous_slot)
+        raise
+    if status is None:
+        _release_create_slot(previous_slot)
+    return new_url, status
 
 
 async def _upload_main_image(client: EldoradoClient, image_url: str) -> dict[str, str]:
@@ -308,6 +422,14 @@ async def _post_new_offer(
     resp = await client.post(url, payload)
     if resp.status_code not in (200, 201):
         logger.error("[create_new] Tạo offer mới thất bại: %s %s", resp.status_code, resp.text[:200])
+        if resp.status_code == 429:
+            # Chờ tăng dần thay vì nghỉ cố định: bị chặn ngắn thì ~1 phút sau
+            # đã thử lại, bị chặn lâu thì giãn dần (không spam POST mỗi chu kỳ).
+            until = offer_cache.record_create_429(
+                time.time(), config.CREATE_BACKOFF_BASE_SECONDS, config.CREATE_BACKOFF_MAX_SECONDS,
+                _retry_after_seconds(resp), resp.text[:200],
+            )
+            logger.warning("[create_new] Tạo offer bị 429 -> thử tạo lại sau %s", _hhmm(until))
         return None, resp.status_code
 
     resp_json = resp.json()
@@ -321,5 +443,6 @@ async def _post_new_offer(
         logger.error("[create_new] Tạo offer trả %s nhưng không đọc được id mới: %s", resp.status_code, resp.text[:200])
         return None, resp.status_code
     new_url = f"https://www.eldorado.gg/dashboard/offers/{offer.category}/edit/{new_id}"
+    offer_cache.record_create_success()
 
     return new_url, resp.status_code
