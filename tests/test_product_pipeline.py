@@ -400,6 +400,10 @@ async def test_process_product_marks_pending_link_after_429_recreate(monkeypatch
 
     row = make_row(STOCK="5", ALLOW_RECREATE_ON_RATE_LIMIT="1")  # STOCK khác offer -> ép dùng full update, không phải price-only
     own_offer = make_own_offer(price="120", quantity=100)
+    # Chỉ Item/Account còn được xoá + tạo lại khi 429 (Currency thì giữ nguyên
+    # offer — xem writer.DELETE_BEFORE_CREATE_TYPES).
+    own_offer.offer_type = "CustomItem"
+    own_offer.category = "CustomItem"
     urls = OfferUrls(detail="d", compare="c", update="https://api/update", change="https://api/change")
 
     client = AsyncMock()
@@ -420,7 +424,7 @@ async def test_process_product_marks_pending_link_after_429_recreate(monkeypatch
     await process_product(row, sheets, client)
 
     _, _, link, _ = sheets.writes[0]
-    assert link == "https://www.eldorado.gg/dashboard/offers/Currency/edit/recreated-id"
+    assert link == "https://www.eldorado.gg/dashboard/offers/CustomItem/edit/recreated-id"
 
     _, pending_link = offer_cache.load_snapshot(row.index, row.get("OWN_LISTING_URL"))
     assert pending_link == link

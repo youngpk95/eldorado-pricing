@@ -67,24 +67,40 @@ async def test_normal_price_change_succeeds_without_touching_create():
 
 
 @pytest.mark.asyncio
-async def test_429_triggers_single_recreate_with_new_price_and_returns_new_link():
+async def test_currency_429_never_deletes_or_recreates():
+    """Test thật 2026-11-14 19:31 (Divine COU): "Quota exceeded" chặn MỌI lệnh
+    ghi trừ DELETE -> Currency (xoá trước rồi mới tạo) bị mất trắng offer.
+    Giờ Currency gặp 429 thì GIỮ NGUYÊN offer, không xoá, không tạo."""
     client = AsyncMock()
-    # change-price VÀ update đầy đủ đều bị 429 (mô phỏng đúng ảnh user gửi)
     client.put.side_effect = [FakeResponse(429, text="Whoa! Calm down, cowboy!"), FakeResponse(429)]
-    client.delete.return_value = FakeResponse(200)
-    # Tạo offer mới THÀNH CÔNG ngay lần đầu (đúng như user xác nhận: tạo mới
-    # không bao giờ bị 429).
-    client.post.return_value = FakeResponse(201, _json={"offer": {"id": "new-id-456"}})
 
     success, message, link = await apply_update(
         client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
         price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
     )
 
+    assert success is False and link is None
+    assert message.startswith("⏳") and "GIỮ NGUYÊN offer" in message
+    client.delete.assert_not_called()
+    client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_item_429_triggers_single_recreate_with_new_price_and_returns_new_link():
+    client = AsyncMock()
+    client.put.side_effect = [FakeResponse(429, text="Whoa! Calm down, cowboy!"), FakeResponse(429)]
+    client.delete.return_value = FakeResponse(200)
+    client.post.return_value = FakeResponse(201, _json={"offer": {"id": "new-id-456"}})
+
+    success, message, link = await apply_update(
+        client, make_item_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
+    )
+
     assert success is True
-    assert link == "https://www.eldorado.gg/dashboard/offers/Currency/edit/new-id-456"
+    assert link == "https://www.eldorado.gg/dashboard/offers/CustomItem/edit/new-id-456"
     assert client.post.call_count == 1  # đúng 1 lần tạo, không có retry loop
-    # Category Currency -> xoá TRƯỚC khi tạo (should_delete_before=True)
+    # Item -> tạo MỚI trước, xoá cũ SAU (offer cũ không bao giờ mất trắng)
     assert client.delete.call_count == 1
 
     # Payload gửi lên phải mang GIÁ MỚI (không phải giá cũ rồi đổi sau)
@@ -104,7 +120,7 @@ async def test_429_then_create_also_fails_reports_clear_error_no_infinite_retry(
     client.post.return_value = FakeResponse(500, text="Internal Server Error")
 
     success, message, link = await apply_update(
-        client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
+        client, make_item_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
         price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
     )
 
@@ -352,7 +368,7 @@ async def test_create_429_quota_sets_cooldown_and_blocks_next_create_without_del
     client.post.return_value = FakeResponse(429, text=QUOTA_BODY)
 
     success, message, _ = await apply_update(
-        client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
+        client, make_item_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
         price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
     )
     assert success is False
@@ -364,7 +380,7 @@ async def test_create_429_quota_sets_cooldown_and_blocks_next_create_without_del
     client.reset_mock()
     client.put.side_effect = [FakeResponse(429), FakeResponse(429)]
     success, message, link = await apply_update(
-        client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
+        client, make_item_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
         price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
     )
     assert success is False and link is None

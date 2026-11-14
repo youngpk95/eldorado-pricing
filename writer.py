@@ -148,7 +148,20 @@ async def apply_update(
         body_texts = "; ".join(r.text[:200] for r in responses)
         return False, f"Cập nhật thất bại (status: {status_summary}) — {body_texts}", None
 
-    # 429 -> xoá + tạo lại VỚI GIÁ MỚI, đúng 1 lần thử — không retry loop.
+    # Currency/TopUp/GiftCard: KHÔNG BAO GIỜ xoá + tạo lại khi 429. Test thật
+    # 2026-11-14 19:31 (Divine COU): khi Eldorado báo "Quota exceeded", MỌI
+    # lệnh ghi (details, changePrice, POST tạo) đều 429 — chỉ DELETE vẫn chạy.
+    # Loại này phải xoá TRƯỚC rồi mới tạo (create_new_offer) -> xoá xong POST
+    # 429 -> mất trắng offer đang bán. Giữ nguyên offer, chu kỳ sau thử lại.
+    otype = offer.offer_type or offer.category
+    if otype in DELETE_BEFORE_CREATE_TYPES:
+        return False, (
+            f"⏳ 429 khi đổi giá ({status_summary}) — Eldorado đang chặn ghi, GIỮ NGUYÊN offer "
+            "(không xoá + tạo lại vì Currency sẽ mất offer), chu kỳ sau thử lại"
+        ), None
+
+    # Item/Account: tạo MỚI trước rồi mới xoá cũ -> POST lỗi thì offer cũ còn
+    # nguyên. 429 -> tạo lại VỚI GIÁ MỚI, đúng 1 lần thử — không retry loop.
     try:
         new_link, create_status = await create_new_offer(
             client, offer, new_price, new_qty, new_min_qty, image_url=image_url
@@ -163,6 +176,11 @@ async def apply_update(
     if new_link:
         return True, "429 rate-limit -> xoá + tạo offer mới thành công", new_link
     return False, f"429 rate-limit -> tạo offer mới cũng thất bại (status {create_status}){create_failure_hint(create_status)}", None
+
+
+# Loại offer mà Eldorado bắt xoá offer cũ TRƯỚC rồi mới tạo được offer mới
+# (giữ đúng như bản gốc RequestEldo.create_new).
+DELETE_BEFORE_CREATE_TYPES = ("Currency", "TopUp", "GiftCard")
 
 
 class CreateCooldownError(Exception):
@@ -268,7 +286,7 @@ async def create_new_offer(
     previous_slot = await _reserve_create_slot()
     otype = offer.offer_type or offer.category
     url_del = _delete_url_for_category(otype, offer.offer_id)
-    should_delete_before = otype in ("Currency", "TopUp", "GiftCard")
+    should_delete_before = otype in DELETE_BEFORE_CREATE_TYPES
 
     if should_delete_before:
         try:
