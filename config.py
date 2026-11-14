@@ -81,7 +81,11 @@ CREATE_BACKOFF_BASE_SECONDS = float(_get("ELDORADO_CREATE_BACKOFF_BASE_SECONDS",
 CREATE_BACKOFF_MAX_SECONDS = float(_get("ELDORADO_CREATE_BACKOFF_MAX_SECONDS", "900"))
 # Khoảng cách tối thiểu giữa 2 lần TẠO offer (mọi dòng dùng chung) — tool tạo
 # dồn dập (2 offer cách nhau <1s mỗi chu kỳ) là nguyên nhân bị chặn 2026-11-14.
-CREATE_MIN_INTERVAL_SECONDS = float(_get("ELDORADO_CREATE_MIN_INTERVAL_SECONDS", "60"))
+# 5s theo yêu cầu user (thao tác tay xoá rồi tạo lại có độ trễ vẫn không bị chặn).
+CREATE_MIN_INTERVAL_SECONDS = float(_get("ELDORADO_CREATE_MIN_INTERVAL_SECONDS", "5"))
+# Chờ giữa bước XOÁ offer cũ và bước TẠO offer mới (theo cả 2 thứ tự), giống
+# thao tác tay — không bắn DELETE + POST liền nhau trong 0.3s.
+RECREATE_STEP_DELAY_SECONDS = float(_get("ELDORADO_RECREATE_STEP_DELAY_SECONDS", "5"))
 ELDORADO_TIMEOUT_SECONDS = float(_get("ELDORADO_TIMEOUT_SECONDS", "20"))
 
 DRY_RUN = _get("DRY_RUN", "true").strip().lower() != "false"

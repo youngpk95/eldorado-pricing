@@ -486,3 +486,31 @@ async def test_image_error_before_post_releases_create_slot(monkeypatch):
     client.post.return_value = FakeResponse(201, _json={"id": "new-2"})
     link, _ = await writer.recreate_offer_from_snapshot(client, make_offer(), Decimal("1"), 10, 1)
     assert link is not None
+
+
+@pytest.mark.asyncio
+async def test_currency_recreate_waits_between_delete_and_create(monkeypatch):
+    """User yêu cầu 2026-11-14: giãn ~5s giữa xoá offer cũ và tạo offer mới."""
+    import writer
+    monkeypatch.setattr(writer.config, "RECREATE_STEP_DELAY_SECONDS", 5)
+    events = []
+    client = AsyncMock()
+
+    async def fake_delete(url):
+        events.append("delete")
+        return FakeResponse(200)
+
+    async def fake_post(url, payload):
+        events.append("post")
+        return FakeResponse(201, _json={"id": "new-1"})
+
+    async def fake_sleep(sec):
+        events.append(f"sleep{sec:g}")
+
+    client.delete.side_effect = fake_delete
+    client.post.side_effect = fake_post
+    monkeypatch.setattr(writer.asyncio, "sleep", fake_sleep)
+
+    link, _ = await writer.create_new_offer(client, make_offer(), Decimal("1"), 10, 1)
+    assert link is not None
+    assert events == ["delete", "sleep5", "post"]

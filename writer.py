@@ -277,10 +277,13 @@ async def create_new_offer(
                 logger.warning("[create_new] Xoá offer cũ trước khi tạo mới thất bại: %s", resp.status_code)
         except Exception as e:
             logger.error("[create_new] Lỗi xoá offer cũ trước: %s", e)
+        # Giãn giữa XOÁ và TẠO như thao tác tay (user yêu cầu 2026-11-14).
+        await asyncio.sleep(config.RECREATE_STEP_DELAY_SECONDS)
 
     new_url, status = await _post_with_slot(previous_slot, client, offer, new_price, new_qty, new_min_qty, image_url)
 
     if new_url and not should_delete_before:
+        await asyncio.sleep(config.RECREATE_STEP_DELAY_SECONDS)
         try:
             resp_del = await client.delete(url_del)
             if resp_del.status_code not in (200, 204):
