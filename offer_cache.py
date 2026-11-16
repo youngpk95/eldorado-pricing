@@ -174,3 +174,68 @@ def set_last_create_at(ts: float) -> None:
     data = _read_create_state()
     data["last_create_at"] = ts
     _write_create_state(data)
+
+
+# ---------------------------------------------------------------------------
+# Tạm dừng MỌI lệnh GHI (đổi giá/sửa/tạo) khi Eldorado báo 429 (dùng chung mọi dòng)
+# ---------------------------------------------------------------------------
+# 2026-11-16: khi "Quota exceeded", trước đây dòng nào, chu kỳ nào cũng vẫn gửi
+# 1-2 lệnh ghi rồi nhận 429 -> phí lệnh, có thể còn kéo dài thời gian bị chặn
+# (14/11 bị chặn > 1 tiếng). Giờ: 1 lệnh ghi bị 429 -> mọi dòng ngừng ghi
+# tới mốc `until` (chờ tăng dần như khi tạo bị 429); hết hạn thì dòng đầu tiên
+# ghi lại chính là lần "thử"; ghi thành công là xoá chờ ngay. File riêng, không
+# đụng create_cooldown.json.
+
+def _write_pause_path() -> Path:
+    return CACHE_DIR / "write_cooldown.json"
+
+
+def _read_write_pause() -> dict[str, Any]:
+    path = _write_pause_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("[cache] Không đọc được write_cooldown.json: %s", e)
+        return {}
+
+
+def _save_write_pause(data: dict[str, Any]) -> None:
+    try:
+        CACHE_DIR.mkdir(exist_ok=True)
+        _write_pause_path().write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        logger.warning("[cache] Không ghi được write_cooldown.json: %s", e)
+
+
+def get_write_pause_until(now: float) -> float | None:
+    """Mốc epoch (giây) đang tạm dừng ghi, None nếu được ghi bình thường."""
+    until = _as_float(_read_write_pause().get("until"))
+    return until if until > now else None
+
+
+def record_write_429(now: float, base: float, cap: float, retry_after: float | None, reason: str) -> float:
+    """1 lệnh ghi bị 429 -> tạm dừng ghi. Chờ base * 2^(số lần liên tiếp - 1),
+    tối đa `cap`, hoặc đúng Retry-After nếu Eldorado gửi. Nhiều dòng cùng bị
+    429 trong lúc đang dừng thì KHÔNG cộng dồn (chỉ tăng khi lần thử sau khi
+    hết dừng vẫn 429)."""
+    data = _read_write_pause()
+    current_until = _as_float(data.get("until"))
+    if current_until > now:
+        return current_until
+    fails = int(_as_float(data.get("fail_count"))) + 1
+    wait = retry_after if retry_after is not None else min(cap, base * 2 ** (fails - 1))
+    until = now + wait
+    data.update({"until": until, "fail_count": fails, "reason": reason})
+    _save_write_pause(data)
+    return until
+
+
+def record_write_success() -> None:
+    """Ghi thành công -> Eldorado đã cho ghi lại, xoá ngay mọi chờ."""
+    data = _read_write_pause()
+    if data.get("until") or data.get("fail_count"):
+        data.update({"until": 0, "fail_count": 0, "reason": None})
+        _save_write_pause(data)

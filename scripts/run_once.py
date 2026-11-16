@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import logging  # noqa: E402
 
 import config  # noqa: E402
-from eldo_auth import EldoradoAuth  # noqa: E402
+from eldo_auth import build_auth  # noqa: E402
+from eldorado_api import BASE_HEADERS  # noqa: E402
 from eldorado_api import EldoradoClient  # noqa: E402
 from main import run_one_cycle  # noqa: E402
 from sheets_client import SheetsClient  # noqa: E402
@@ -29,8 +30,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 async def main() -> None:
     logging.info("Chạy 1 chu kỳ — DRY_RUN=%s", config.DRY_RUN)
     sheets = SheetsClient()
-    auth = EldoradoAuth()
-    client = EldoradoClient(get_cookie=auth.get_cookie)
+    client = EldoradoClient(build_auth(BASE_HEADERS["User-Agent"]))
     semaphore = asyncio.Semaphore(config.CONCURRENCY_LIMIT)
     try:
         await run_one_cycle(sheets, client, semaphore)

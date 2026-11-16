@@ -24,8 +24,8 @@ if sys.stderr.encoding != "utf-8":
 
 import config
 import updater
-from eldo_auth import EldoradoAuth
-from eldorado_api import EldoradoClient, write_stats
+from eldo_auth import build_auth
+from eldorado_api import BASE_HEADERS, EldoradoClient, write_stats
 from models import ProductRow
 from product_pipeline import RowConfig, process_product
 from sheets_client import SheetsClient, extract_spreadsheet_id
@@ -226,8 +226,7 @@ async def _check_and_apply_update(client: EldoradoClient, sheets: SheetsClient) 
 async def main() -> None:
     logger.info("Khởi động Eldorado Repricer — DRY_RUN=%s", config.DRY_RUN)
     sheets = SheetsClient()
-    auth = EldoradoAuth()
-    client = EldoradoClient(get_cookie=auth.get_cookie)
+    client = EldoradoClient(build_auth(BASE_HEADERS["User-Agent"]))
     semaphore = asyncio.Semaphore(config.CONCURRENCY_LIMIT)
     last_update_check = 0.0
     await asyncio.to_thread(_write_version_status, sheets, VERSION_STATUS_STARTUP)

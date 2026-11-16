@@ -35,7 +35,7 @@ import httpx
 
 import config
 import offer_cache
-from eldorado_api import EldoradoApiError, EldoradoClient, resolve_attribute_value_id
+from eldorado_api import EldoradoApiError, EldoradoClient, resolve_attribute_value_id, retry_after_seconds
 from image_source import ImageError, download_image
 from models import OfferUrls, OwnOffer
 
@@ -107,6 +107,14 @@ async def apply_update(
     hàm sẽ dừng lại tưởng đã xong trong khi stock/minQty chưa hề được gửi
     lên Eldorado. Nên CHỈ được dùng đường tắt (đổi giá riêng, nhẹ hơn) khi
     thực sự không có gì khác cần đổi cùng lúc."""
+    # Vừa có lệnh ghi khác bị 429 -> KHÔNG gửi gì cả (2026-11-16): trước đây
+    # dòng nào/chu kỳ nào cũng gửi 1-2 lệnh rồi lại 429, phí lệnh vô ích.
+    paused_until = offer_cache.get_write_pause_until(time.time())
+    if paused_until is not None:
+        return False, (
+            f"⏳ Eldorado đang chặn ghi (429) — tool tạm dừng MỌI lệnh ghi tới {_hhmm(paused_until)}, "
+            "chưa đổi giá/stock dòng này, sẽ tự thử lại sau mốc đó"
+        ), None
     details_payload = _build_details_payload(offer, new_price, new_qty, new_min_qty)
     price_only_payload = {"amount": float(new_price), "currency": "USD"}
 
@@ -225,6 +233,11 @@ async def _reserve_create_slot() -> float:
         until = offer_cache.get_create_cooldown_until(now)
         if until is not None:
             raise CreateCooldownError(until, "Eldorado đang chặn tạo offer (429)")
+        # Lệnh ghi nào đó vừa bị 429 -> tạo offer gần như chắc chắn cũng 429
+        # (test thật 2026-11-14: "Quota exceeded" chặn MỌI lệnh ghi) -> không thử.
+        paused = offer_cache.get_write_pause_until(now)
+        if paused is not None:
+            raise CreateCooldownError(paused, "Eldorado đang chặn ghi (429)")
         previous = offer_cache.get_last_create_at()
         next_allowed = previous + config.CREATE_MIN_INTERVAL_SECONDS
         if now < next_allowed:
@@ -235,17 +248,6 @@ async def _reserve_create_slot() -> float:
 
 def _release_create_slot(previous: float) -> None:
     offer_cache.set_last_create_at(previous)
-
-
-def _retry_after_seconds(resp: httpx.Response) -> float | None:
-    """Header Retry-After (dạng số giây) nếu Eldorado có gửi; dạng ngày giờ
-    hoặc giá trị lạ thì bỏ qua (dùng chờ tăng dần)."""
-    headers = getattr(resp, "headers", None) or {}
-    try:
-        value = float(headers.get("Retry-After", ""))
-    except (TypeError, ValueError):
-        return None
-    return value if 0 < value <= 24 * 3600 else None
 
 
 def create_failure_hint(status: int | None) -> str:
@@ -448,7 +450,7 @@ async def _post_new_offer(
             # đã thử lại, bị chặn lâu thì giãn dần (không spam POST mỗi chu kỳ).
             until = offer_cache.record_create_429(
                 time.time(), config.CREATE_BACKOFF_BASE_SECONDS, config.CREATE_BACKOFF_MAX_SECONDS,
-                _retry_after_seconds(resp), resp.text[:200],
+                retry_after_seconds(resp), resp.text[:200],
             )
             logger.warning("[create_new] Tạo offer bị 429 -> thử tạo lại sau %s", _hhmm(until))
         return None, resp.status_code

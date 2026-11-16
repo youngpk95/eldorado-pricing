@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 import httpx
 
 import config
+import offer_cache
 from models import CompareResult, CompetitorMatch, OfferUrls, OwnOffer
 
 logger = logging.getLogger(__name__)
@@ -330,25 +331,73 @@ class WriteStats:
 write_stats = WriteStats()
 
 
+def retry_after_seconds(resp: httpx.Response) -> float | None:
+    """Header Retry-After (dạng số giây) nếu Eldorado có gửi; dạng ngày giờ
+    hoặc giá trị lạ thì bỏ qua (dùng chờ tăng dần)."""
+    headers = getattr(resp, "headers", None) or {}
+    try:
+        value = float(headers.get("Retry-After", ""))
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value <= 24 * 3600 else None
+
+
+def _is_light_write(method: str, url: str) -> bool:
+    """Lệnh đổi giá riêng (changePrice / item .../price) hoặc POST (tạo offer,
+    upload ảnh). 2026-11-14: có lúc CHỈ update đầy đủ (PUT .../details) bị 429
+    còn changePrice vẫn chạy; còn khi "Quota exceeded" thì MỌI lệnh ghi đều
+    429. Nên chỉ 429 ở các lệnh này mới coi là cả shop đang bị chặn ghi."""
+    path = url.split("?", 1)[0].rstrip("/")
+    return method == "POST" or path.endswith("/changePrice") or path.endswith("/price")
+
+
+def _record_write_result(method: str, url: str, resp: httpx.Response) -> None:
+    """changePrice/tạo bị 429 -> MỌI dòng tạm dừng ghi (offer_cache.record_write_429);
+    ghi thành công -> bỏ tạm dừng. Xem writer.apply_update (kiểm tra trước khi ghi).
+    PUT details bị 429 KHÔNG gây tạm dừng (changePrice có thể vẫn chạy)."""
+    status = resp.status_code
+    if status == 429 and _is_light_write(method, url):
+        until = offer_cache.record_write_429(
+            time.time(), config.WRITE_PAUSE_BASE_SECONDS, config.WRITE_PAUSE_MAX_SECONDS,
+            retry_after_seconds(resp), (getattr(resp, "text", "") or "")[:200],
+        )
+        logger.warning("[ghi] 429 -> tạm dừng MỌI lệnh ghi tới %s", time.strftime("%H:%M:%S", time.localtime(until)))
+    elif 200 <= status < 300:
+        offer_cache.record_write_success()
+
+
 class EldoradoClient:
-    def __init__(self, get_cookie) -> None:
-        self._get_cookie = get_cookie  # async callable () -> str
+    def __init__(self, auth) -> None:
+        # auth: eldo_auth.EldoradoAuth (cookie) hoặc eldo_auth.SellerApiAuth
+        # (Bearer token) — cùng giao diện get_auth_headers()/invalidate().
+        self._auth = auth
         self._http = httpx.AsyncClient(timeout=config.ELDORADO_TIMEOUT_SECONDS)
 
     async def aclose(self) -> None:
         await self._http.aclose()
 
     async def _headers(self, content_type: bool = False) -> dict[str, str]:
-        cookie = await self._get_cookie()
-        headers = {**BASE_HEADERS, "Cookie": cookie}
+        headers = {**BASE_HEADERS, **(await self._auth.get_auth_headers())}
         if content_type:
             headers["Content-Type"] = "application/json"
         return headers
 
+    async def _request(self, method: str, url: str, content_type: bool = False, **kwargs) -> httpx.Response:
+        """Gửi request kèm header đăng nhập; gặp 401 (token/cookie hết hạn
+        sớm hoặc bị thu hồi) thì đăng nhập lại và thử đúng 1 lần nữa."""
+        headers = await self._headers(content_type)
+        resp = await self._http.request(method, url, headers=headers, **kwargs)
+        if resp.status_code == 401:
+            logger.warning("[auth] Eldorado trả 401 (%s) — đăng nhập lại rồi thử lại 1 lần", method)
+            # Truyền header ĐÃ dùng: nhiều dòng cùng 401 thì chỉ dòng đầu bắt
+            # đăng nhập lại, các dòng sau dùng luôn token/cookie mới đó.
+            self._auth.invalidate(headers)
+            resp = await self._http.request(method, url, headers=await self._headers(content_type), **kwargs)
+        return resp
+
     async def get_own_offer(self, offer_id: str, offer_type: str) -> tuple[OwnOffer, OfferUrls]:
         urls = get_api_urls(offer_id, offer_type)
-        headers = await self._headers()
-        resp = await self._http.get(urls.detail, headers=headers)
+        resp = await self._request("GET", urls.detail)
         if resp.status_code in (400, 404):
             raise OfferNotFoundError("Không tìm thấy ID sản phẩm")
         if resp.status_code != 200:
@@ -392,8 +441,7 @@ class EldoradoClient:
         return f"{API_BASE}/predefinedOffers/augmentedGame/offers?gameId={offer.game_id}&category={offer.category}&{'&'.join(query_parts)}"
 
     async def get_competitors(self, compare_url: str) -> list[dict]:
-        headers = await self._headers()
-        resp = await self._http.get(compare_url, headers=headers)
+        resp = await self._request("GET", compare_url)
         if resp.status_code == 429:
             raise EldoradoApiError("Eldorado giới hạn tần suất yêu cầu (429)")
         if resp.status_code != 200:
@@ -412,16 +460,16 @@ class EldoradoClient:
 
     async def put(self, url: str, payload: dict) -> httpx.Response:
         await self._pace_write()
-        headers = await self._headers(content_type=True)
-        resp = await self._http.put(url, headers=headers, json=payload)
+        resp = await self._request("PUT", url, content_type=True, json=payload)
         write_stats.record("PUT", resp.status_code)
+        _record_write_result("PUT", url, resp)
         return resp
 
     async def post(self, url: str, payload: dict) -> httpx.Response:
         await self._pace_write()
-        headers = await self._headers(content_type=True)
-        resp = await self._http.post(url, headers=headers, json=payload)
+        resp = await self._request("POST", url, content_type=True, json=payload)
         write_stats.record("POST", resp.status_code)
+        _record_write_result("POST", url, resp)
         return resp
 
     async def upload_offer_image(self, data: bytes, filename: str, content_type: str) -> dict[str, str]:
@@ -429,9 +477,9 @@ class EldoradoClient:
         smallImage/largeImage/originalSizeImage để gắn vào `mainOfferImage`.
         KHÔNG ép Content-Type: json (httpx tự đặt multipart + boundary)."""
         await self._pace_write()
-        headers = await self._headers()
-        resp = await self._http.post(IMAGE_UPLOAD_URL, headers=headers, files={"image": (filename, data, content_type)})
+        resp = await self._request("POST", IMAGE_UPLOAD_URL, files={"image": (filename, data, content_type)})
         write_stats.record("UPLOAD", resp.status_code)
+        _record_write_result("POST", IMAGE_UPLOAD_URL, resp)
         if resp.status_code != 200:
             raise EldoradoApiError(f"Upload ảnh lên Eldorado thất bại (status {resp.status_code}) — {resp.text[:200]}")
         try:
@@ -442,8 +490,9 @@ class EldoradoClient:
 
     async def delete(self, url: str) -> httpx.Response:
         await self._pace_write()
-        headers = await self._headers(content_type=True)
-        resp = await self._http.delete(url, headers=headers)
+        # DELETE KHÔNG tính vào tạm dừng ghi: khi "Quota exceeded" DELETE vẫn
+        # chạy (test 2026-11-14), 204 ở đây không có nghĩa là hết bị chặn ghi.
+        resp = await self._request("DELETE", url, content_type=True)
         write_stats.record("DELETE", resp.status_code)
         return resp
 

@@ -24,10 +24,20 @@ def _get(name: str, default: str | None = None, required: bool = False) -> str:
     return value
 
 
-ELDORADO_EMAIL = _get("ELDORADO_EMAIL", required=True)
-ELDORADO_PASSWORD = _get("ELDORADO_PASSWORD", required=True)
-ELDORADO_COGNITO_POOL_ID = _get("ELDORADO_COGNITO_POOL_ID", required=True)
-ELDORADO_COGNITO_CLIENT_ID = _get("ELDORADO_COGNITO_CLIENT_ID", required=True)
+# Seller API CHÍNH THỨC của Eldorado (Dashboard > Seller API > Generate
+# credentials, chỉ nick OWNER tạo được). Có đủ 2 biến này -> tool đăng nhập
+# bằng token chính thức (eldo_auth.SellerApiAuth), KHÔNG cần email/mật khẩu
+# nữa. Để trống -> đăng nhập kiểu cũ (Cognito SRP bằng email/mật khẩu).
+# Lưu ý (test thật 2026-11-16): Seller API dùng CHUNG quota 429 với cả shop,
+# không giúp thoát "Calm down, cowboy".
+ELDORADO_SELLER_CLIENT_ID = _get("ELDORADO_SELLER_CLIENT_ID", "") or ""
+ELDORADO_SELLER_CLIENT_SECRET = _get("ELDORADO_SELLER_CLIENT_SECRET", "") or ""
+USE_SELLER_API = bool(ELDORADO_SELLER_CLIENT_ID.strip() and ELDORADO_SELLER_CLIENT_SECRET.strip())
+
+ELDORADO_EMAIL = _get("ELDORADO_EMAIL", required=not USE_SELLER_API)
+ELDORADO_PASSWORD = _get("ELDORADO_PASSWORD", required=not USE_SELLER_API)
+ELDORADO_COGNITO_POOL_ID = _get("ELDORADO_COGNITO_POOL_ID", required=not USE_SELLER_API)
+ELDORADO_COGNITO_CLIENT_ID = _get("ELDORADO_COGNITO_CLIENT_ID", required=not USE_SELLER_API)
 ELDORADO_COGNITO_REGION = _get("ELDORADO_COGNITO_REGION", "us-east-2")
 
 SHEET_CONFIG_ID = _get("SHEET_CONFIG_ID", required=True)
@@ -79,6 +89,11 @@ ELDORADO_WRITE_DELAY_MS = float(_get("ELDORADO_WRITE_DELAY_MS", "300"))
 # Eldorado gửi Retry-After thì làm theo Retry-After. Xem writer._post_new_offer.
 CREATE_BACKOFF_BASE_SECONDS = float(_get("ELDORADO_CREATE_BACKOFF_BASE_SECONDS", "60"))
 CREATE_BACKOFF_MAX_SECONDS = float(_get("ELDORADO_CREATE_BACKOFF_MAX_SECONDS", "900"))
+# BẤT KỲ lệnh GHI nào (đổi giá/sửa/tạo) bị 429 -> MỌI dòng tạm dừng ghi:
+# BASE, 2xBASE, 4xBASE... tối đa MAX; ghi thành công 1 lần là xoá chờ ngay.
+# Tránh việc dòng nào/chu kỳ nào cũng gửi lệnh rồi lại nhận 429 (2026-11-16).
+WRITE_PAUSE_BASE_SECONDS = float(_get("ELDORADO_WRITE_PAUSE_BASE_SECONDS", "60"))
+WRITE_PAUSE_MAX_SECONDS = float(_get("ELDORADO_WRITE_PAUSE_MAX_SECONDS", "900"))
 # Khoảng cách tối thiểu giữa 2 lần TẠO offer (mọi dòng dùng chung) — tool tạo
 # dồn dập (2 offer cách nhau <1s mỗi chu kỳ) là nguyên nhân bị chặn 2026-11-14.
 # 5s theo yêu cầu user (thao tác tay xoá rồi tạo lại có độ trễ vẫn không bị chặn).
