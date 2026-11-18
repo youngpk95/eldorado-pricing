@@ -131,3 +131,13 @@ def test_recover_attributes_ambiguous_sibling_frames_not_guessed(monkeypatch, tm
     offer_cache.save_snapshot(1, "https://x/1", a)
     offer_cache.save_snapshot(2, "https://x/2", b)
     assert offer_cache.recover_attributes(0, "https://x/0", "Currency", "220", "Currency", "divine-orb") is None
+
+
+def test_entry_points_import_in_fresh_interpreter():
+    """Bug thật 2026-11-18: offer_cache <-> eldorado_api import vòng tròn, pytest
+    không thấy (import theo thứ tự khác) nhưng `python main.py` chết ngay."""
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    for mod in ("eldorado_api", "offer_cache", "writer", "product_pipeline", "main"):
+        r = subprocess.run([sys.executable, "-c", f"import {mod}"], cwd=root, capture_output=True, text=True)
+        assert r.returncode == 0, f"import {mod} lỗi:\n{r.stderr[-600:]}"
