@@ -130,6 +130,14 @@ async def apply_update(
             return True, "Đổi giá thành công (change price)", None
         if no_attrs:  # fallback PUT /details sẽ chắc chắn 400 vì thiếu attribute
             return False, f"Đổi giá thất bại (status {resp_price.status_code}) — {MISSING_ATTR_NOTE}", None
+        # changePrice vừa bị 429 -> client đã bật tạm dừng ghi toàn cục: KHÔNG gửi thêm
+        # PUT /details (chắc chắn vô ích, chỉ tốn thêm quota).
+        paused_now = offer_cache.get_write_pause_until(time.time()) if resp_price.status_code == 429 else None
+        if paused_now is not None:
+            return False, (
+                f"⏳ 429 khi đổi giá — Eldorado đang chặn ghi, tool tạm dừng MỌI lệnh ghi tới "
+                f"{_hhmm(paused_now)}, GIỮ NGUYÊN offer, sẽ tự thử lại sau mốc đó"
+            ), None
         resp_full = await client.put(urls.update, details_payload)
         responses.append(resp_full)
         if resp_full.status_code == 200:

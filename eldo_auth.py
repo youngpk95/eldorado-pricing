@@ -136,6 +136,8 @@ class SellerApiAuth:
             now = time.time()
             if self._token is None or now >= self._refresh_at:
                 if now < self._failed_until:
+                    if self._token is not None and now < self._expires_at:
+                        return {"Authorization": f"Bearer {self._token}"}  # token cũ còn hạn
                     raise EldoradoApiError(self._last_error)
                 logger.info("[auth] Lấy token Seller API...")
                 try:
@@ -144,6 +146,10 @@ class SellerApiAuth:
                     self._failed_until = now + SELLER_TOKEN_FAILURE_RETRY_SECONDS
                     self._last_error = str(e) if isinstance(e, EldoradoApiError) else f"Lỗi lấy token Seller API: {e}"
                     logger.error("[auth] %s", self._last_error)
+                    if self._token is not None and now < self._expires_at:
+                        # Làm mới sớm lỗi nhưng token cũ còn hạn -> vẫn dùng tiếp, đừng từ chối request.
+                        logger.warning("[auth] Dùng tiếp token cũ (còn hạn) trong khi chờ thử lại.")
+                        return {"Authorization": f"Bearer {self._token}"}
                     raise EldoradoApiError(self._last_error) from e
                 self._token = token
                 self._expires_at = now + expires_in

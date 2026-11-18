@@ -228,3 +228,43 @@ def test_build_auth_picks_seller_api_when_configured(monkeypatch):
     assert isinstance(eldo_auth.build_auth("UA"), eldo_auth.SellerApiAuth)
     monkeypatch.setattr(eldo_auth.config, "USE_SELLER_API", False)
     assert isinstance(eldo_auth.build_auth("UA"), eldo_auth.EldoradoAuth)
+
+
+@pytest.mark.asyncio
+async def test_seller_auth_early_refresh_failure_keeps_using_valid_token(monkeypatch):
+    """Làm mới sớm (còn <120s) lỗi nhưng token cũ chưa hết hạn -> vẫn trả token cũ, không từ chối request."""
+    from eldorado_api import EldoradoApiError
+    auth = eldo_auth.SellerApiAuth("id", "secret", "UA")
+    state = {"fail": False, "calls": 0}
+
+    async def fetch():
+        state["calls"] += 1
+        if state["fail"]:
+            raise EldoradoApiError("Lấy token Seller API thất bại (status 500)")
+        return "t1", 900.0
+    monkeypatch.setattr(auth, "_fetch_token", fetch)
+    now = [1000.0]
+    monkeypatch.setattr(eldo_auth.time, "time", lambda: now[0])
+    await auth.get_auth_headers()
+    state["fail"] = True
+    now[0] += 800  # trong biên làm mới, token còn 100s
+    assert await auth.get_auth_headers() == {"Authorization": "Bearer t1"}
+    assert await auth.get_auth_headers() == {"Authorization": "Bearer t1"}  # trong thời gian chờ thử lại
+    assert state["calls"] == 2
+    now[0] += 200  # token hết hạn thật, vẫn trong thời gian chờ thử lại -> lỗi
+    with pytest.raises(EldoradoApiError):
+        await auth.get_auth_headers()
+
+
+@pytest.mark.asyncio
+async def test_price_429_that_starts_pause_does_not_send_extra_details_put(monkeypatch):
+    client = AsyncMock()
+    client.put.return_value = FakeResponse(429, text="Whoa! Calm down, cowboy!")
+    calls = iter([None, time.time() + 600])  # đầu hàm: chưa dừng; sau changePrice 429: đã dừng
+    monkeypatch.setattr(offer_cache, "get_write_pause_until", lambda now: next(calls))
+    ok, message, link = await writer.apply_update(
+        client, make_offer(), OfferUrls(detail="d", compare="c", update="https://api/update", change="https://api/change"), Decimal("1"), 1, 1,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
+    )
+    assert ok is False and link is None and "GIỮ NGUYÊN" in message
+    assert client.put.call_count == 1
