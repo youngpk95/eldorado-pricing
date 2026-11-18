@@ -42,7 +42,7 @@ def make_offer() -> OwnOffer:
         delivery_method="",
         trade_environment_values=[{"id": "te1", "value": "Standard"}],
         attributes_raw=[],
-        raw_offer={"gameId": "220", "category": "Currency", "attributes": [], "volumeDiscounts": []},
+        raw_offer={"gameId": "220", "category": "Currency", "attributes": [{"id": "path-of-exile-orbs", "type": "Select", "value": {"id": "divine-orb"}}], "volumeDiscounts": []},
     )
 
 
@@ -530,3 +530,41 @@ async def test_currency_recreate_waits_between_delete_and_create(monkeypatch):
     link, _ = await writer.create_new_offer(client, make_offer(), Decimal("1"), 10, 1)
     assert link is not None
     assert events == ["delete", "sleep5", "post"]
+
+
+
+@pytest.mark.asyncio
+async def test_currency_without_attributes_sends_no_full_update_but_price_only_still_works():
+    offer = make_offer()
+    offer.raw_offer["attributes"] = []
+    client = AsyncMock()
+    client.put.return_value = FakeResponse(200)
+
+    ok, msg, _ = await apply_update(
+        client, offer, make_urls(), Decimal("0.00145"), 999999, 700,
+        price_changed=True, only_price_changed=False, allow_create_new=True, create_new_enabled=True,
+    )
+    assert ok is False and "attribute" in msg
+    client.put.assert_not_called()
+
+    ok, _, _ = await apply_update(
+        client, offer, make_urls(), Decimal("0.00145"), offer.quantity, offer.min_quantity,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
+    )
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_no_attributes_price_only_failure_does_not_fall_back_to_full_put_or_delete():
+    offer = make_offer()
+    offer.raw_offer["attributes"] = []
+    client = AsyncMock()
+    client.put.return_value = FakeResponse(429)
+
+    ok, msg, link = await apply_update(
+        client, offer, make_urls(), Decimal("0.00145"), offer.quantity, offer.min_quantity,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
+    )
+    assert ok is False and link is None and client.put.call_count == 1
+    client.delete.assert_not_called()
+    client.post.assert_not_called()

@@ -41,7 +41,7 @@ def make_own_offer(price="120", quantity=200, min_quantity=1) -> OwnOffer:
         delivery_method="",
         trade_environment_values=[],
         attributes_raw=[],
-        raw_offer={"gameId": "201", "category": "Currency", "attributes": [], "volumeDiscounts": []},
+        raw_offer={"gameId": "201", "category": "Currency", "attributes": [{"id": "path-of-exile-orbs", "type": "Select", "value": {"id": "divine-orb"}}], "volumeDiscounts": []},
     )
 
 

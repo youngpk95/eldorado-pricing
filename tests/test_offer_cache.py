@@ -91,3 +91,43 @@ def test_save_snapshot_clears_previous_pending_link(monkeypatch, tmp_path):
     _, pending_link = offer_cache.load_snapshot(0, url)
 
     assert pending_link is None
+
+
+ATTR = {"id": "path-of-exile-orbs", "name": "Orbs", "type": "Select", "value": {"id": "divine-orb", "name": "Divine Orb"}}
+
+
+def test_recover_attributes_from_own_old_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setattr(offer_cache, "CACHE_DIR", tmp_path)
+    url = "https://www.eldorado.gg/dashboard/offers/Currency/edit/abc123"
+    good = make_offer()
+    good.raw_offer["attributes"] = [ATTR]
+    offer_cache.save_snapshot(0, url, good)
+
+    found = offer_cache.recover_attributes(0, url, "Currency", "220", "Currency", None)
+    assert found is not None and found[0][0]["value"]["id"] == "divine-orb"
+
+
+def test_recover_attributes_from_sheet_value_and_sibling_template(monkeypatch, tmp_path):
+    monkeypatch.setattr(offer_cache, "CACHE_DIR", tmp_path)
+    sibling = make_offer()
+    sibling.raw_offer["attributes"] = [ATTR]
+    offer_cache.save_snapshot(1, "https://x/1", sibling)
+
+    found = offer_cache.recover_attributes(0, "https://x/0", "Currency", "220", "Currency", "mirror-of-kalandra")
+    assert found is not None
+    assert found[0][0]["id"] == "path-of-exile-orbs" and found[0][0]["value"]["id"] == "mirror-of-kalandra"
+
+
+def test_recover_attributes_returns_none_when_nothing_known(monkeypatch, tmp_path):
+    monkeypatch.setattr(offer_cache, "CACHE_DIR", tmp_path)
+    assert offer_cache.recover_attributes(0, "https://x/0", "Currency", "220", "Currency", None) is None
+
+
+def test_recover_attributes_ambiguous_sibling_frames_not_guessed(monkeypatch, tmp_path):
+    monkeypatch.setattr(offer_cache, "CACHE_DIR", tmp_path)
+    a, b = make_offer(), make_offer()
+    a.raw_offer["attributes"] = [ATTR]
+    b.raw_offer["attributes"] = [{**ATTR, "id": "other-attr"}]
+    offer_cache.save_snapshot(1, "https://x/1", a)
+    offer_cache.save_snapshot(2, "https://x/2", b)
+    assert offer_cache.recover_attributes(0, "https://x/0", "Currency", "220", "Currency", "divine-orb") is None

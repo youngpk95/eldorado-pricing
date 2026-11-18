@@ -12,6 +12,7 @@ khi nhiều dòng được xử lý song song (asyncio.gather, xem product_pipel
 cùng ghi cache 1 lúc."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from dataclasses import asdict
@@ -19,6 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from eldorado_api import resolve_attribute_value_id
 from models import OwnOffer
 
 logger = logging.getLogger(__name__)
@@ -239,3 +241,54 @@ def record_write_success() -> None:
     if data.get("until") or data.get("fail_count"):
         data.update({"until": 0, "fail_count": 0, "reason": None})
         _save_write_pause(data)
+
+
+def _valid_attributes(raw_attributes) -> list[dict]:
+    """Cùng luật với writer._build_offer_attributes (có `id` và value-id không None)."""
+    out = []
+    for attr in raw_attributes or []:
+        if isinstance(attr, dict) and "id" in attr and resolve_attribute_value_id(attr.get("value")) is not None:
+            out.append(attr)
+    return out
+
+
+def recover_attributes(
+    row_index: int, own_listing_url: str, offer_type: str, game_id: str, category: str,
+    sheet_attr_value_id: str | None,
+) -> tuple[list[dict], str] | None:
+    """Offer sống nhưng Eldorado trả `attributes` rỗng (bug 2026-11-17: mất
+    attribute Orbs sau 1 lệnh PUT /details, rồi mọi PUT/POST đều 400 "Required
+    attribute 'Orbs' is not set"). Lấy lại attribute theo thứ tự:
+    1) snapshot cũ của CHÍNH dòng này (khớp own_listing_url) nếu còn attribute;
+    2) `attribute_value_id` trong Compare URL của sheet + khung attribute (id/
+       name/type) lấy từ snapshot dòng khác CÙNG game/category/offer_type —
+       chỉ khi mọi dòng đó dùng đúng 1 attribute id (mơ hồ -> không đoán).
+    Trả (attributes, nguồn) hoặc None nếu không có cách nào."""
+    snap = load_snapshot(row_index, own_listing_url)
+    if snap is not None:
+        good = _valid_attributes(snap[0].raw_offer.get("attributes"))
+        if good:
+            return copy.deepcopy(good), "snapshot cũ của dòng này"
+    if not sheet_attr_value_id:
+        return None
+    frames: dict[str, tuple[dict, str]] = {}
+    for path in sorted(CACHE_DIR.glob("row_*.json")):
+        if path == _cache_path(row_index):
+            continue
+        try:
+            other = (json.loads(path.read_text(encoding="utf-8")).get("offer") or {})
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (str(other.get("game_id")) != str(game_id) or other.get("category") != category
+                or other.get("offer_type") != offer_type):
+            continue
+        good = _valid_attributes((other.get("raw_offer") or {}).get("attributes"))
+        if len(good) == 1:
+            frames.setdefault(str(good[0]["id"]), (good[0], path.name))
+    if len(frames) != 1:
+        return None
+    frame, fname = next(iter(frames.values()))
+    attr = copy.deepcopy(frame)
+    attr["value"] = {"id": sheet_attr_value_id, "name": sheet_attr_value_id}
+    attr["values"] = [attr["value"]]
+    return [attr], f"attribute_value_id={sheet_attr_value_id} trong Compare URL + khung từ {fname}"

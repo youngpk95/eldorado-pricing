@@ -115,6 +115,9 @@ async def apply_update(
             f"⏳ Eldorado đang chặn ghi (429) — tool tạm dừng MỌI lệnh ghi tới {_hhmm(paused_until)}, "
             "chưa đổi giá/stock dòng này, sẽ tự thử lại sau mốc đó"
         ), None
+    no_attrs = lacks_required_attributes(offer)
+    if no_attrs and not only_price_changed:
+        return False, MISSING_ATTR_NOTE, None
     details_payload = _build_details_payload(offer, new_price, new_qty, new_min_qty)
     price_only_payload = {"amount": float(new_price), "currency": "USD"}
 
@@ -125,6 +128,8 @@ async def apply_update(
         responses.append(resp_price)
         if resp_price.status_code == 200:
             return True, "Đổi giá thành công (change price)", None
+        if no_attrs:  # fallback PUT /details sẽ chắc chắn 400 vì thiếu attribute
+            return False, f"Đổi giá thất bại (status {resp_price.status_code}) — {MISSING_ATTR_NOTE}", None
         resp_full = await client.put(urls.update, details_payload)
         responses.append(resp_full)
         if resp_full.status_code == 200:
@@ -189,6 +194,25 @@ async def apply_update(
 # Loại offer mà Eldorado bắt xoá offer cũ TRƯỚC rồi mới tạo được offer mới
 # (giữ đúng như bản gốc RequestEldo.create_new).
 DELETE_BEFORE_CREATE_TYPES = ("Currency", "TopUp", "GiftCard")
+
+def lacks_required_attributes(offer: OwnOffer) -> bool:
+    """Chỉ Currency (loại đã bị 400 "Required attribute 'Orbs'"); TopUp/GiftCard
+    giữ hành vi cũ vì có thể hợp lệ khi không có attribute."""
+    return (offer.offer_type or offer.category) == "Currency" and not _build_offer_attributes(
+        offer.raw_offer.get("attributes", [])
+    )
+
+
+MISSING_ATTR_NOTE = (
+    "❌ Offer không có attribute (vd Orbs) và tool không khôi phục được — KHÔNG gửi lệnh ghi vì chắc chắn bị 400. "
+    "Sửa: thêm &attribute_value_id=<id> (vd divine-orb) vào cuối Compare URL của dòng này."
+)
+
+
+class MissingAttributesError(Exception):
+    """Offer Currency/TopUp/GiftCard không có attribute nào (vd Orbs) để gửi —
+    Eldorado chắc chắn trả 400 "Required attribute ... is not set", nên KHÔNG
+    gửi (tránh spam lệnh ghi hỏng mỗi chu kỳ)."""
 
 
 class CreateCooldownError(Exception):
@@ -285,6 +309,8 @@ async def create_new_offer(
     trước khi kịp gọi request)."""
     # Đang bị chặn tạo offer -> dừng NGAY, trước khi xoá offer cũ (Currency
     # xoá trước rồi mới tạo — POST chắc chắn 429 thì sẽ mất trắng offer).
+    if lacks_required_attributes(offer):  # kiểm TRƯỚC khi xoá offer cũ (Currency xoá trước rồi mới tạo)
+        raise MissingAttributesError(MISSING_ATTR_NOTE)
     previous_slot = await _reserve_create_slot()
     otype = offer.offer_type or offer.category
     url_del = _delete_url_for_category(otype, offer.offer_id)
@@ -336,7 +362,7 @@ async def _post_with_slot(previous_slot: float, client: EldoradoClient, *args, *
     category lạ -> status None) thì trả lại lượt tạo cho dòng khác."""
     try:
         new_url, status = await _post_new_offer(client, *args, **kwargs)
-    except ImageError:
+    except (ImageError, MissingAttributesError):
         _release_create_slot(previous_slot)
         raise
     if status is None:
@@ -400,6 +426,9 @@ async def _post_new_offer(
     game_id = offer.raw_offer.get("gameId")
     trade_env_id = offer.trade_environment_values[-1]["id"] if offer.trade_environment_values else None
     offer_attributes = _build_offer_attributes(offer.raw_offer.get("attributes", []))
+    if lacks_required_attributes(offer):
+        logger.error("[create_new] Snapshot không có attribute (Orbs) -> KHÔNG gửi POST (chắc chắn 400)")
+        raise MissingAttributesError(MISSING_ATTR_NOTE)
 
     if otype in ("Currency", "TopUp", "GiftCard"):
         url = "https://www.eldorado.gg/api/predefinedOffers/"

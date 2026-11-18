@@ -7,9 +7,11 @@ cột Link Sheet/Name Sheet/Cell Min — xem RowConfig.price_min bên dưới.""
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from urllib.parse import parse_qs, urlparse
 
 import config
 import eldorado_api as eldo
@@ -367,6 +369,27 @@ async def _compute_target(
     return new_price, new_stock, new_min_qty, note_lines
 
 
+async def _heal_missing_attributes(row: ProductRow, cfg: "RowConfig", offer: OwnOffer) -> None:
+    """GET offer sống nhưng `attributes` rỗng (Currency/TopUp/GiftCard) -> lấy
+    lại từ snapshot cũ / Compare URL TRƯỚC khi lưu snapshot mới (nếu không,
+    snapshot tốt bị ghi đè bằng bản rỗng) và trước PUT/POST (xem
+    offer_cache.recover_attributes). Sửa tại chỗ `offer`."""
+    if not writer.lacks_required_attributes(offer):
+        return
+    sheet_value = (parse_qs(urlparse(cfg.compare_url).query).get("attribute_value_id") or [None])[0]
+    found = await asyncio.to_thread(
+        offer_cache.recover_attributes, row.index, cfg.own_listing_url,
+        offer.offer_type or offer.category, offer.game_id, offer.category, sheet_value
+    )
+    if found is None:
+        logger.error("[heal] Dòng %s: offer %s không có attribute và không khôi phục được", row.index, offer.offer_id)
+        return
+    attrs, source = found
+    offer.raw_offer["attributes"] = attrs
+    offer.attributes_raw = copy.deepcopy(attrs)
+    logger.warning("[heal] Dòng %s: Eldorado trả attributes rỗng -> khôi phục từ %s", row.index, source)
+
+
 async def _recover_missing_offer(
     row: ProductRow, cfg: RowConfig, sheets: SheetsClient, client: EldoradoClient
 ) -> None:
@@ -429,6 +452,10 @@ async def _recover_missing_offer(
         note_lines.insert(0, f"⏳ Offer đã bị xoá — CHƯA tạo lại: {e}. Cần bán gấp thì tạo tay rồi dán link vào My Listing URL.")
         await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
         return
+    except writer.MissingAttributesError as e:
+        note_lines.insert(0, f"❌ Offer đã bị xoá, CHƯA tạo lại: {e}")
+        await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
+        return
     except ImageError as e:
         note_lines.insert(0, f"❌ Offer đã bị xoá, tự tạo lại THẤT BẠI do lỗi ảnh: {e} — sửa Image URL rồi tool sẽ thử lại ở chu kỳ sau.")
         await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
@@ -470,6 +497,7 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
             await _recover_missing_offer(row, cfg, sheets, client)
             return
 
+        await _heal_missing_attributes(row, cfg, offer)
         await _save_snapshot(row.index, cfg.own_listing_url, offer)
 
         new_price, new_stock, new_min_qty, note_lines = await _compute_target(cfg, offer, client)
