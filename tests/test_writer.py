@@ -570,12 +570,16 @@ async def test_no_attributes_price_only_failure_does_not_fall_back_to_full_put_o
     client.post.assert_not_called()
 
 
-def test_build_offer_attributes_reads_values_list_when_value_key_missing():
-    """Bug thật 2026-11-18: offer tạo lại trả attributes CHỈ có `values` (không có
-    `value`) -> bị lọc hết -> 400 'Required attribute Orbs is not set'."""
+def test_build_offer_attributes_uses_web_format_values_string_list():
+    """2026-11-18: PUT /details chỉ nhận Select dạng {id,type,values:[<id chuỗi>]} (đúng như web
+    Eldorado); dạng cũ value:"divine-orb" bị 400 'Required attribute Orbs is not set'."""
     from writer import _build_offer_attributes
     live = [{"values": [{"name": "Divine Orb", "id": "divine-orb"}], "name": "Orbs",
-             "id": "path-of-exile-orbs", "type": "Select"}]
-    assert _build_offer_attributes(live) == [{"id": "path-of-exile-orbs", "type": "Select", "value": "divine-orb"}]
-    two = [{"id": "x", "values": [{"id": "a"}, {"id": "b"}]}]
-    assert _build_offer_attributes(two) == []  # nhiều giá trị -> không đoán
+             "id": "path-of-exile-2-orbs", "type": "Select"}]
+    assert _build_offer_attributes(live) == [{"id": "path-of-exile-2-orbs", "type": "Select", "values": ["divine-orb"]}]
+    old = [{"value": {"id": "divine-orb"}, "id": "o", "type": "Select"}]  # snapshot dạng cũ chỉ có `value`
+    assert _build_offer_attributes(old) == [{"id": "o", "type": "Select", "values": ["divine-orb"]}]
+    two = [{"id": "x", "type": "Select", "values": [{"id": "a"}, {"id": "b"}]}]
+    assert _build_offer_attributes(two) == [{"id": "x", "type": "Select", "values": ["a", "b"]}]
+    assert _build_offer_attributes([{"id": "x", "type": "Select", "values": []}]) == []
+    assert _build_offer_attributes([{"id": "n", "type": "Numeric", "value": 5}]) == [{"id": "n", "type": "Numeric", "value": 5}]

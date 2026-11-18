@@ -49,12 +49,35 @@ READ_ONLY_FIELDS = [
 ]
 
 
+def _select_value_ids(attr: dict) -> list:
+    """Danh sách id giá trị của 1 attribute Select (từ `values` hoặc `value`)."""
+    raw = attr.get("values")
+    if not isinstance(raw, list) or not raw:
+        single = attr.get("value")
+        raw = [single] if single is not None else []
+    ids = [v.get("id") if isinstance(v, dict) else v for v in raw]
+    return [v for v in ids if v not in (None, "")]
+
+
 def _build_offer_attributes(raw_attributes: list[dict]) -> list[dict]:
+    """Đổi attributes của offer (GET) sang `offerAttributes` của PUT/POST.
+    Định dạng lấy từ chính bundle JS của web Eldorado (2026-11-18, sau khi
+    API cũ `value`: "divine-orb" bắt đầu bị 400 "Required attribute 'Orbs' is
+    not set"): Select -> {id, type, values: ["divine-orb"]} (mảng id CHUỖI —
+    mảng object bị 400 "values[0] invalid"); Numeric -> {id, type, value: số}."""
     result = []
-    for attr in raw_attributes:
-        value_id = attribute_value_id(attr)
-        if "id" in attr and value_id is not None:
-            result.append({"id": attr["id"], "type": attr.get("type", "Select"), "value": value_id})
+    for attr in raw_attributes or []:
+        if not isinstance(attr, dict) or "id" not in attr:
+            continue
+        attr_type = attr.get("type", "Select")
+        if attr_type == "Select":
+            ids = _select_value_ids(attr)
+            if ids:
+                result.append({"id": attr["id"], "type": "Select", "values": ids})
+        else:
+            value = attr.get("value")
+            if value is not None:
+                result.append({"id": attr["id"], "type": attr_type, "value": value})
     return result
 
 
