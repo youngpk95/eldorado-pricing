@@ -213,3 +213,10 @@ def test_write_stats_counts_window_and_logs_429_transitions(caplog):
     msgs = [r.getMessage() for r in caplog.records]
     assert sum("BẮT ĐẦU bị 429" in m for m in msgs) == 1
     assert sum("Hết bị 429" in m for m in msgs) == 1
+
+
+def test_compare_url_uses_values_list_when_value_key_missing():
+    from eldorado_api import build_compare_url_from_sheet
+    attrs = [{"id": "path-of-exile-orbs", "values": [{"id": "divine-orb"}], "type": "Select"}]
+    url = build_compare_url_from_sheet("https://www.eldorado.gg/path-of-exile/og/abc", "2", "Currency", [], attrs)
+    assert "path-of-exile-orbs=divine-orb" in url

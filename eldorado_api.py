@@ -20,7 +20,7 @@ import httpx
 
 import config
 import offer_cache
-from models import CompareResult, CompetitorMatch, OfferUrls, OwnOffer
+from models import CompareResult, CompetitorMatch, OfferUrls, OwnOffer, attribute_value_id
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +178,7 @@ def build_compare_url_from_sheet(
         first_attr = attributes_raw[0]
         if isinstance(first_attr, dict) and "id" in first_attr:
             detail_attr_key = first_attr.get("id") or None
-            detail_attr_value_id = resolve_attribute_value_id(first_attr.get("value"))
+            detail_attr_value_id = attribute_value_id(first_attr)
 
     renamed: dict[str, list[str]] = {}
     sheet_te_fallback: dict[int, str] = {}

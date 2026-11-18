@@ -568,3 +568,14 @@ async def test_no_attributes_price_only_failure_does_not_fall_back_to_full_put_o
     assert ok is False and link is None and client.put.call_count == 1
     client.delete.assert_not_called()
     client.post.assert_not_called()
+
+
+def test_build_offer_attributes_reads_values_list_when_value_key_missing():
+    """Bug thật 2026-11-18: offer tạo lại trả attributes CHỈ có `values` (không có
+    `value`) -> bị lọc hết -> 400 'Required attribute Orbs is not set'."""
+    from writer import _build_offer_attributes
+    live = [{"values": [{"name": "Divine Orb", "id": "divine-orb"}], "name": "Orbs",
+             "id": "path-of-exile-orbs", "type": "Select"}]
+    assert _build_offer_attributes(live) == [{"id": "path-of-exile-orbs", "type": "Select", "value": "divine-orb"}]
+    two = [{"id": "x", "values": [{"id": "a"}, {"id": "b"}]}]
+    assert _build_offer_attributes(two) == []  # nhiều giá trị -> không đoán

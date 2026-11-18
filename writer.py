@@ -35,9 +35,9 @@ import httpx
 
 import config
 import offer_cache
-from eldorado_api import EldoradoApiError, EldoradoClient, resolve_attribute_value_id, retry_after_seconds
+from eldorado_api import EldoradoApiError, EldoradoClient, retry_after_seconds
 from image_source import ImageError, download_image
-from models import OfferUrls, OwnOffer
+from models import OfferUrls, OwnOffer, attribute_value_id
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ READ_ONLY_FIELDS = [
 def _build_offer_attributes(raw_attributes: list[dict]) -> list[dict]:
     result = []
     for attr in raw_attributes:
-        value_id = resolve_attribute_value_id(attr.get("value"))
+        value_id = attribute_value_id(attr)
         if "id" in attr and value_id is not None:
             result.append({"id": attr["id"], "type": attr.get("type", "Select"), "value": value_id})
     return result

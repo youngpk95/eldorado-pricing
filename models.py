@@ -77,3 +77,18 @@ class ProductResult:
     note_lines: list[str] = field(default_factory=list)
     new_offer_link: str | None = None
     error: str | None = None
+
+
+def attribute_value_id(attr: dict):
+    """value-id của 1 attribute offer Eldorado. Response có 2 dạng (bug thật
+    2026-11-18): offer cũ có `value` ({"id": ...} hoặc scalar) + `values`;
+    offer tạo lại bằng POST chỉ có `values` = [{"id": ...}] KHÔNG có `value` ->
+    đọc mỗi `value` thì ra None, attribute bị lọc hết -> 400 "Required
+    attribute 'Orbs' is not set". Dạng 2 chỉ dùng khi `values` có ĐÚNG 1 phần
+    tử (Select 1 giá trị) — nhiều hơn thì không đoán."""
+    value = attr.get("value")
+    if value is None:
+        values = attr.get("values")
+        if isinstance(values, list) and len(values) == 1:
+            value = values[0]
+    return value.get("id") if isinstance(value, dict) else value

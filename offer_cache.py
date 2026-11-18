@@ -20,7 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from models import OwnOffer
+from models import OwnOffer, attribute_value_id
 
 logger = logging.getLogger(__name__)
 
@@ -244,17 +244,10 @@ def record_write_success() -> None:
 
 def _valid_attributes(raw_attributes) -> list[dict]:
     """Cùng luật với writer._build_offer_attributes (có `id` và value-id không None)."""
-    out = []
-    for attr in raw_attributes or []:
-        if not isinstance(attr, dict) or "id" not in attr:
-            continue
-        value = attr.get("value")
-        # Cùng luật với eldorado_api.resolve_attribute_value_id — KHÔNG import
-        # từ đó: eldorado_api import offer_cache -> vòng tròn, `python main.py` chết.
-        value_id = value.get("id") if isinstance(value, dict) else value
-        if value_id is not None:
-            out.append(attr)
-    return out
+    return [
+        attr for attr in raw_attributes or []
+        if isinstance(attr, dict) and "id" in attr and attribute_value_id(attr) is not None
+    ]
 
 
 def recover_attributes(
