@@ -206,3 +206,13 @@ def test_find_min_quantity_worked_examples():
     # đúng từ tool sibling (G2G repricer, cùng logic toán học).
     assert find_min_quantity(Decimal("1"), Decimal("0.085"), Decimal("10")) == 20
     assert find_min_quantity(Decimal("1"), Decimal("0.085"), Decimal("1")) == 12
+
+
+def test_keep_min_quantity_tolerance():
+    from pricing import keep_min_quantity
+    assert keep_min_quantity(1100, 1000, 0.10) == 1100   # cao hơn đúng 10% -> giữ
+    assert keep_min_quantity(1101, 1000, 0.10) == 1000   # quá ngưỡng -> cập nhật
+    assert keep_min_quantity(290, 300, 0.10) == 300      # old thấp hơn mức cần -> PHẢI tăng
+    assert keep_min_quantity(300, 300, 0.10) == 300
+    assert keep_min_quantity(1100, 1000, 0) == 1000      # 0 = tắt
+    assert keep_min_quantity(0, 1000, 0.10) == 1000

@@ -347,6 +347,7 @@ async def _compute_target(
     new_min_qty = offer.min_quantity
     if cfg.min_purchase_base is not None and new_price > 0:
         new_min_qty = pricing.find_min_quantity(cfg.min_purchase_base, new_price, cfg.min_purchase_coef)
+        new_min_qty = pricing.keep_min_quantity(offer.min_quantity, new_min_qty, config.MIN_QTY_TOLERANCE)
 
     note_lines = [
         f"Giá: {offer.price} -> {new_price} | Stock: {offer.quantity} -> {new_stock} | "

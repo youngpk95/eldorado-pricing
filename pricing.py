@@ -96,3 +96,15 @@ def find_min_quantity(total_order_min: Decimal, price: Decimal, round_coef: Deci
     while (x + z) % coef != 0:
         z += 1
     return z + x
+
+
+def keep_min_quantity(old: int, new: int, tolerance: float) -> int:
+    """minQty nên dùng. Giữ `old` (khỏi gửi lệnh ghi nặng) khi nó vẫn ĐẠT yêu cầu
+    (old >= new, tức đơn tối thiểu không thấp hơn mức mong muốn) và chỉ cao hơn `new`
+    không quá `tolerance` (tỉ lệ). Giá giảm -> new tăng vượt old -> luôn cập nhật."""
+    if tolerance <= 0 or old <= 0 or new <= 0:
+        return new
+    if new <= old <= new * (1 + tolerance):
+        return old
+    return new
+
