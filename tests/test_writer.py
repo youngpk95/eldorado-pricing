@@ -441,6 +441,47 @@ async def test_full_update_429_falls_back_to_change_price_without_recreate():
     client.post.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_details_gate_spaces_currency_details_and_still_changes_price():
+    """Đo thực tế 2026-11-21: PUT /details Currency có bình quota rất nhỏ -> cả shop
+    chỉ 1 lệnh/khoảng giãn. Lệnh đầu đi /details; lệnh kế (chưa tới lượt) chỉ đổi
+    giá bằng changePrice, hoặc không gửi gì nếu giá không đổi."""
+    import offer_cache
+    client = AsyncMock()
+    client.put.side_effect = [FakeResponse(200), FakeResponse(200)]
+
+    ok1, _, _ = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00145"), 5, 69,
+        price_changed=True, only_price_changed=False, allow_create_new=True, create_new_enabled=True,
+    )
+    ok2, msg2, _ = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00146"), 5, 69,
+        price_changed=True, only_price_changed=False, allow_create_new=True, create_new_enabled=True,
+    )
+    ok3, msg3, _ = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00146"), 9, 69,
+        price_changed=False, only_price_changed=False, allow_create_new=True, create_new_enabled=True,
+    )
+
+    assert ok1 and ok2 and not ok3
+    assert [c.args[0] for c in client.put.call_args_list] == ["https://api/update", "https://api/change"]
+    assert "chờ lượt update đầy đủ" in msg2
+    assert "Chờ lượt" in msg3
+
+
+def test_details_gate_429_keeps_same_interval():
+    import offer_cache
+    assert offer_cache.reserve_details_slot(1000.0, 200) is None
+    assert offer_cache.reserve_details_slot(1100.0, 200) == 1200.0      # chưa tới lượt
+    assert offer_cache.reserve_details_slot(1200.0, 200) is None        # tới lượt
+    # 429 liên tiếp: nhịp luôn là 200s, không lùi gấp đôi
+    assert offer_cache.record_details_429(1300.0, 200) == 1500.0
+    assert offer_cache.record_details_429(1500.0, 200) == 1700.0
+    # Retry-After lớn hơn thì theo Retry-After; nhỏ hơn thì vẫn giữ 200s
+    assert offer_cache.record_details_429(2000.0, 200, 600.0) == 2600.0
+    assert offer_cache.record_details_429(3000.0, 200, 30.0) == 3200.0
+    assert offer_cache.reserve_details_slot(0.0, 0) is None             # interval=0 = tắt
+
 def test_create_backoff_grows_exponentially_and_caps():
     import offer_cache
     waits = [offer_cache.record_create_429(1000.0, 60, 900, None, "q") - 1000.0 for _ in range(6)]

@@ -242,6 +242,70 @@ def record_write_success() -> None:
         _save_write_pause(data)
 
 
+# ---------------------------------------------------------------------------
+# Giãn nhịp PUT /details của offer Currency/TopUp/GiftCard (2026-11-21).
+# Đo thực tế: endpoint này có "bình quota" rất nhỏ (~3 lệnh liên tiếp, đầy lại
+# sau ~10 phút), dùng chung cho mọi cách đăng nhập. Tool gửi dồn ~145 lệnh/giờ
+# nên gần như luôn 429. Ở đây: cả shop chỉ được gửi 1 lệnh /details mỗi
+# `interval` giây (giữ chỗ nguyên tử); bị 429 vẫn giữ nguyên nhịp đó.
+# Item (endpoint khác) và changePrice KHÔNG bị ảnh hưởng.
+
+def _details_gate_path() -> Path:
+    return CACHE_DIR / "details_gate.json"
+
+
+def _read_details_gate() -> dict[str, Any]:
+    path = _details_gate_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("[cache] Không đọc được details_gate.json: %s", e)
+        return {}
+
+
+def _save_details_gate(data: dict[str, Any]) -> None:
+    try:
+        CACHE_DIR.mkdir(exist_ok=True)
+        _details_gate_path().write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        logger.warning("[cache] Không ghi được details_gate.json: %s", e)
+
+
+def reserve_details_slot(now: float, interval: float) -> float | None:
+    """None = được gửi 1 lệnh /details ngay (đã giữ chỗ cho `interval` giây
+    tới); số = mốc epoch phải chờ. Hàm đồng bộ (không await) nên các dòng chạy
+    song song trong 1 event loop không thể cùng giành 1 chỗ."""
+    if interval <= 0:
+        return None
+    data = _read_details_gate()
+    next_at = _as_float(data.get("next_at"))
+    if next_at > now:
+        return next_at
+    data["next_at"] = now + interval
+    _save_details_gate(data)
+    return None
+
+
+def record_details_429(now: float, interval: float, retry_after: float | None = None) -> float:
+    """Lệnh /details bị 429 -> GIỮ NGUYÊN nhịp `interval` (không lùi gấp đôi);
+    chỉ khi Eldorado gửi Retry-After lớn hơn thì theo Retry-After."""
+    data = _read_details_gate()
+    wait = max(interval, retry_after) if retry_after is not None else interval
+    data.update({"next_at": now + wait, "fail_count": int(_as_float(data.get("fail_count"))) + 1})
+    _save_details_gate(data)
+    return now + wait
+
+
+def record_details_success() -> None:
+    data = _read_details_gate()
+    if data.get("fail_count"):
+        data["fail_count"] = 0
+        _save_details_gate(data)
+
+
 def _valid_attributes(raw_attributes) -> list[dict]:
     """Cùng luật với writer._build_offer_attributes (có `id` và value-id không None)."""
     return [

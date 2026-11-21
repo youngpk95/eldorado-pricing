@@ -105,6 +105,9 @@ RECREATE_STEP_DELAY_SECONDS = float(_get("ELDORADO_RECREATE_STEP_DELAY_SECONDS",
 # changePrice nhẹ. Giữ minQty cũ nếu nó vẫn đạt yêu cầu và chỉ cao hơn mức tính mới không quá
 # tỉ lệ này (0.20 = 20%). Đặt 0 để tắt (luôn cập nhật theo giá).
 MIN_QTY_TOLERANCE = float(_get("ELDORADO_MIN_QTY_TOLERANCE", "0.20"))
+# PUT /details của offer Currency/TopUp/GiftCard: cả shop chỉ gửi 1 lệnh mỗi
+# từng này giây (0 = tắt giãn nhịp). Bị 429 vẫn giữ nguyên nhịp này.
+DETAILS_MIN_INTERVAL_SECONDS = float(_get("ELDORADO_DETAILS_MIN_INTERVAL_SECONDS", "200"))
 ELDORADO_TIMEOUT_SECONDS = float(_get("ELDORADO_TIMEOUT_SECONDS", "20"))
 
 DRY_RUN = _get("DRY_RUN", "true").strip().lower() != "false"

@@ -108,6 +108,26 @@ def _build_details_payload(offer: OwnOffer, new_price: Decimal, new_qty: int, ne
     }
 
 
+def _details_is_gated(offer: OwnOffer) -> bool:
+    """PUT /details của Currency/TopUp/GiftCard có bình quota rất nhỏ -> phải
+    giãn nhịp. Item/Account dùng endpoint khác (đo thực tế không bị 429)."""
+    return config.DETAILS_MIN_INTERVAL_SECONDS > 0 and (offer.offer_type or offer.category) in DELETE_BEFORE_CREATE_TYPES
+
+
+def _record_details_result(gated: bool, resp: httpx.Response) -> None:
+    if not gated:
+        return
+    if resp.status_code == 429:
+        raw = (getattr(resp, "headers", None) or {}).get("retry-after")
+        try:
+            retry_after = float(raw) if raw else None
+        except (TypeError, ValueError):
+            retry_after = None
+        offer_cache.record_details_429(time.time(), config.DETAILS_MIN_INTERVAL_SECONDS, retry_after)
+    elif resp.status_code == 200:
+        offer_cache.record_details_success()
+
+
 async def apply_update(
     client: EldoradoClient,
     offer: OwnOffer,
@@ -163,21 +183,41 @@ async def apply_update(
             ), None
         resp_full = await client.put(urls.update, details_payload)
         responses.append(resp_full)
+        _record_details_result(_details_is_gated(offer), resp_full)
         if resp_full.status_code == 200:
             return True, "Cập nhật thành công (fallback: update đầy đủ)", None
     else:
         # Giá VÀ/HOẶC stock/minQty đều cần đổi -> PHẢI dùng endpoint update
         # đầy đủ (gửi cả 3 field 1 lần) — không dùng đường tắt đổi-giá-riêng
         # ở đây, tránh bỏ sót stock/minQty như bug đã gặp.
-        resp_full = await client.put(urls.update, details_payload)
-        responses.append(resp_full)
-        if resp_full.status_code == 200:
-            return True, "Cập nhật thành công (đầy đủ: giá/stock/minQty)", None
+        gated = _details_is_gated(offer)
+        wait_until = (
+            offer_cache.reserve_details_slot(time.time(), config.DETAILS_MIN_INTERVAL_SECONDS) if gated else None
+        )
+        if wait_until is not None:
+            # Chưa tới lượt /details (Eldorado giới hạn rất chặt): đổi GIÁ bằng
+            # changePrice (nhẹ), stock/minQty chờ lượt sau — không gửi lệnh chắc chắn 429.
+            if not price_changed:
+                return False, (
+                    f"⏳ Chờ lượt update đầy đủ (Eldorado giới hạn PUT /details) — thử lại sau {_hhmm(wait_until)}"
+                ), None
+            resp_price = await client.put(urls.change, price_only_payload)
+            responses.append(resp_price)
+            if resp_price.status_code == 200:
+                return True, (
+                    f"Đổi giá thành công (change price) — stock/minQty chờ lượt update đầy đủ (sau {_hhmm(wait_until)})"
+                ), None
+        else:
+            resp_full = await client.put(urls.update, details_payload)
+            responses.append(resp_full)
+            _record_details_result(gated, resp_full)
+            if resp_full.status_code == 200:
+                return True, "Cập nhật thành công (đầy đủ: giá/stock/minQty)", None
         # User xác nhận 2026-11-14: khi trang sửa offer (update đầy đủ) bị 429
         # "Calm down", ô đổi giá ở danh sách offer (changePrice — đúng endpoint
         # urls.change) vẫn đổi được. Nên ưu tiên đổi GIÁ trước (quan trọng nhất)
         # thay vì nhảy thẳng sang xoá + tạo lại; stock/minQty để chu kỳ sau.
-        if resp_full.status_code == 429 and price_changed:
+        if wait_until is None and resp_full.status_code == 429 and price_changed:
             resp_price = await client.put(urls.change, price_only_payload)
             responses.append(resp_price)
             if resp_price.status_code == 200:
