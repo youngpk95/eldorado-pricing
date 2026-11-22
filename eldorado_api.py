@@ -347,8 +347,10 @@ def _is_light_write(method: str, url: str) -> bool:
     upload ảnh). 2026-11-14: có lúc CHỈ update đầy đủ (PUT .../details) bị 429
     còn changePrice vẫn chạy; còn khi "Quota exceeded" thì MỌI lệnh ghi đều
     429. Nên chỉ 429 ở các lệnh này mới coi là cả shop đang bị chặn ghi."""
-    path = url.split("?", 1)[0].rstrip("/")
-    return method == "POST" or path.endswith("/changePrice") or path.endswith("/price")
+    # 2026-11-22: changePrice KHÔNG còn tính là "cả shop bị chặn" — log cho thấy
+    # hạn mức changePrice tính RIÊNG TỪNG OFFER (Divine COU bị 429 trong khi Divine
+    # SD cùng giây vẫn 200). Chỉ POST (tạo/ghi đè offer) 429 mới dừng toàn bộ.
+    return method == "POST"
 
 
 def _record_write_result(method: str, url: str, resp: httpx.Response) -> None:

@@ -100,8 +100,19 @@ async def test_put_429_starts_pause_and_200_clears_it(monkeypatch):
     monkeypatch.setattr(writer.config, "ELDORADO_WRITE_DELAY_MS", 0)
     statuses = iter([429, 200])
     client = _client_with(lambda req: httpx.Response(next(statuses), text="Quota exceeded"))
-    await client.put("https://www.eldorado.gg/api/predefinedOffersUser/me/x/changePrice", {"amount": 1})
+    await client.post("https://www.eldorado.gg/api/predefinedOffers/", {"x": 1})
     assert offer_cache.get_write_pause_until(time.time()) is not None
+    await client.post("https://www.eldorado.gg/api/predefinedOffers/", {"x": 1})
+    assert offer_cache.get_write_pause_until(time.time()) is None
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_change_price_429_does_not_pause_other_offers(monkeypatch):
+    """Hạn mức changePrice tính RIÊNG TỪNG OFFER (log 2026-11-22) -> 429 ở 1 offer
+    không được dừng ghi của cả shop."""
+    monkeypatch.setattr(writer.config, "ELDORADO_WRITE_DELAY_MS", 0)
+    client = _client_with(lambda req: httpx.Response(429, text="Quota exceeded"))
     await client.put("https://www.eldorado.gg/api/predefinedOffersUser/me/x/changePrice", {"amount": 1})
     assert offer_cache.get_write_pause_until(time.time()) is None
     await client.aclose()
@@ -254,17 +265,3 @@ async def test_seller_auth_early_refresh_failure_keeps_using_valid_token(monkeyp
     now[0] += 200  # token hết hạn thật, vẫn trong thời gian chờ thử lại -> lỗi
     with pytest.raises(EldoradoApiError):
         await auth.get_auth_headers()
-
-
-@pytest.mark.asyncio
-async def test_price_429_that_starts_pause_does_not_send_extra_details_put(monkeypatch):
-    client = AsyncMock()
-    client.put.return_value = FakeResponse(429, text="Whoa! Calm down, cowboy!")
-    calls = iter([None, time.time() + 600])  # đầu hàm: chưa dừng; sau changePrice 429: đã dừng
-    monkeypatch.setattr(offer_cache, "get_write_pause_until", lambda now: next(calls))
-    ok, message, link = await writer.apply_update(
-        client, make_offer(), OfferUrls(detail="d", compare="c", update="https://api/update", change="https://api/change"), Decimal("1"), 1, 1,
-        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
-    )
-    assert ok is False and link is None and "GIỮ NGUYÊN" in message
-    assert client.put.call_count == 1

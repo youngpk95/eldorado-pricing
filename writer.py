@@ -128,6 +128,33 @@ def _record_details_result(gated: bool, resp: httpx.Response) -> None:
         offer_cache.record_details_success()
 
 
+# Offer vừa bị 429 ở CẢ 3 đường (edit, changePrice, POST ghi đè) -> nghỉ riêng
+# offer đó (hạn mức changePrice tính theo TỪNG OFFER, không ảnh hưởng dòng khác).
+_OFFER_BLOCK_SECONDS = 600.0
+_offer_block_until: dict[str, float] = {}
+
+
+async def _override_via_post(
+    client: EldoradoClient, offer: OwnOffer, new_price: Decimal, new_qty: int, new_min_qty: int,
+) -> tuple[bool, str]:
+    """Đường thứ 3 cho Currency/TopUp/GiftCard: POST tạo offer với dữ liệu TRÙNG
+    offer đang có -> Eldorado ghi đè đúng offer đó (cùng id, offerVersion tăng;
+    test thật 2026-11-22, 13 lần liên tiếp không 429). KHÔNG xoá gì nên bị 429
+    thì offer cũ vẫn nguyên. Trả (thành công, mô tả)."""
+    try:
+        link, status = await recreate_offer_from_snapshot(client, offer, new_price, new_qty, new_min_qty)
+    except CreateCooldownError as e:
+        return False, f"POST ghi đè chưa gửi: {e}"
+    except (MissingAttributesError, ImageError) as e:
+        return False, f"POST ghi đè không gửi được: {e}"
+    if not link:
+        return False, f"POST ghi đè thất bại (status {status}){create_failure_hint(status)}"
+    if not link.rstrip("/").endswith(offer.offer_id):
+        logger.error("[override] POST trả id KHÁC offer hiện tại (%s) -> có thể đã tạo thêm 1 offer: %s", offer.offer_id, link)
+        return False, f"⚠️ POST tạo ra offer MỚI thay vì ghi đè ({link}) — kiểm tra tay trên dashboard, offer cũ vẫn còn"
+    return True, "Cập nhật thành công (POST ghi đè — đường thứ 3, vì edit và changePrice đều 429)"
+
+
 async def apply_update(
     client: EldoradoClient,
     offer: OwnOffer,
@@ -158,6 +185,12 @@ async def apply_update(
             f"⏳ Eldorado đang chặn ghi (429) — tool tạm dừng MỌI lệnh ghi tới {_hhmm(paused_until)}, "
             "chưa đổi giá/stock dòng này, sẽ tự thử lại sau mốc đó"
         ), None
+    blocked_until = _offer_block_until.get(offer.offer_id, 0.0)
+    if blocked_until > time.time():
+        return False, (
+            f"⏳ Offer này bị 429 ở cả 3 đường (edit, changePrice, POST ghi đè) — nghỉ tới {_hhmm(blocked_until)}, "
+            "GIỮ NGUYÊN offer, sẽ tự thử lại sau mốc đó"
+        ), None
     no_attrs = lacks_required_attributes(offer)
     if no_attrs and not only_price_changed:
         return False, MISSING_ATTR_NOTE, None
@@ -175,17 +208,16 @@ async def apply_update(
             return False, f"Đổi giá thất bại (status {resp_price.status_code}) — {MISSING_ATTR_NOTE}", None
         # changePrice vừa bị 429 -> client đã bật tạm dừng ghi toàn cục: KHÔNG gửi thêm
         # PUT /details (chắc chắn vô ích, chỉ tốn thêm quota).
-        paused_now = offer_cache.get_write_pause_until(time.time()) if resp_price.status_code == 429 else None
-        if paused_now is not None:
-            return False, (
-                f"⏳ 429 khi đổi giá — Eldorado đang chặn ghi, tool tạm dừng MỌI lệnh ghi tới "
-                f"{_hhmm(paused_now)}, GIỮ NGUYÊN offer, sẽ tự thử lại sau mốc đó"
-            ), None
-        resp_full = await client.put(urls.update, details_payload)
-        responses.append(resp_full)
-        _record_details_result(_details_is_gated(offer), resp_full)
-        if resp_full.status_code == 200:
-            return True, "Cập nhật thành công (fallback: update đầy đủ)", None
+        fb_gated = _details_is_gated(offer)
+        fb_wait = (
+            offer_cache.reserve_details_slot(time.time(), config.DETAILS_MIN_INTERVAL_SECONDS) if fb_gated else None
+        )
+        if fb_wait is None:  # chưa tới lượt /details thì bỏ qua, sang POST ghi đè
+            resp_full = await client.put(urls.update, details_payload)
+            responses.append(resp_full)
+            _record_details_result(fb_gated, resp_full)
+            if resp_full.status_code == 200:
+                return True, "Cập nhật thành công (fallback: update đầy đủ)", None
     else:
         # Giá VÀ/HOẶC stock/minQty đều cần đổi -> PHẢI dùng endpoint update
         # đầy đủ (gửi cả 3 field 1 lần) — không dùng đường tắt đổi-giá-riêng
@@ -228,6 +260,15 @@ async def apply_update(
 
     is_429 = any(r.status_code == 429 for r in responses)
     status_summary = ", ".join(f"{r.status_code}" for r in responses)
+    otype = offer.offer_type or offer.category
+    if is_429 and otype in DELETE_BEFORE_CREATE_TYPES and not no_attrs:
+        # Đường thứ 3: POST ghi đè (không xoá) — chỉ khi edit/changePrice đều 429.
+        ok, msg = await _override_via_post(client, offer, new_price, new_qty, new_min_qty)
+        if ok:
+            return True, msg, None
+        if "429" in msg:
+            _offer_block_until[offer.offer_id] = time.time() + _OFFER_BLOCK_SECONDS
+        return False, f"⏳ 429 ({status_summary}) — {msg}. GIỮ NGUYÊN offer, chu kỳ sau thử lại", None
     if not (is_429 and allow_create_new and create_new_enabled):
         body_texts = "; ".join(r.text[:200] for r in responses)
         return False, f"Cập nhật thất bại (status: {status_summary}) — {body_texts}", None

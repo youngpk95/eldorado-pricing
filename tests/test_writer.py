@@ -67,22 +67,57 @@ async def test_normal_price_change_succeeds_without_touching_create():
 
 
 @pytest.mark.asyncio
-async def test_currency_429_never_deletes_or_recreates():
-    """Test thật 2026-11-14 19:31 (Divine COU): "Quota exceeded" chặn MỌI lệnh
-    ghi trừ DELETE -> Currency (xoá trước rồi mới tạo) bị mất trắng offer.
-    Giờ Currency gặp 429 thì GIỮ NGUYÊN offer, không xoá, không tạo."""
+async def test_currency_429_on_edit_and_change_price_falls_back_to_post_override_without_deleting():
+    """Cả edit và changePrice 429 -> POST ghi đè (cùng id), KHÔNG xoá offer."""
     client = AsyncMock()
     client.put.side_effect = [FakeResponse(429, text="Whoa! Calm down, cowboy!"), FakeResponse(429)]
+    client.post.return_value = FakeResponse(201, _json={"id": "old-id-123"})
+
+    success, message, link = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=False,
+    )
+
+    assert success is True and link is None and "POST ghi đè" in message
+    client.delete.assert_not_called()
+    assert client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_currency_all_three_paths_429_keeps_offer_and_rests_that_offer():
+    client = AsyncMock()
+    client.put.side_effect = [FakeResponse(429), FakeResponse(429)]
+    client.post.return_value = FakeResponse(429, text="Whoa! Calm down, cowboy!")
 
     success, message, link = await apply_update(
         client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
         price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
     )
-
-    assert success is False and link is None
-    assert message.startswith("⏳") and "GIỮ NGUYÊN offer" in message
+    assert success is False and link is None and "GIỮ NGUYÊN" in message
     client.delete.assert_not_called()
+
+    # Offer đó nghỉ riêng: lần gọi kế KHÔNG gửi thêm lệnh nào.
+    client.reset_mock()
+    success, message, _ = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
+    )
+    assert success is False and "nghỉ tới" in message
+    client.put.assert_not_called()
     client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_post_override_returning_different_id_is_reported_not_success():
+    client = AsyncMock()
+    client.put.side_effect = [FakeResponse(429), FakeResponse(429)]
+    client.post.return_value = FakeResponse(201, _json={"id": "some-other-id"})
+    success, message, link = await apply_update(
+        client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
+        price_changed=True, only_price_changed=True, allow_create_new=True, create_new_enabled=True,
+    )
+    assert success is False and "offer MỚI" in message
+    client.delete.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -134,6 +169,7 @@ async def test_429_then_create_also_fails_reports_clear_error_no_infinite_retry(
 async def test_429_but_create_new_disabled_does_not_attempt_recreate():
     client = AsyncMock()
     client.put.side_effect = [FakeResponse(429), FakeResponse(429)]
+    client.post.return_value = FakeResponse(429)
 
     success, message, link = await apply_update(
         client, make_offer(), make_urls(), Decimal("0.00145"), 999999, 69,
@@ -142,7 +178,6 @@ async def test_429_but_create_new_disabled_does_not_attempt_recreate():
 
     assert success is False
     assert link is None
-    client.post.assert_not_called()
     client.delete.assert_not_called()
 
 

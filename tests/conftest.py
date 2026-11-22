@@ -24,5 +24,6 @@ def _reset_create_spacing(monkeypatch):
     """Mốc 'lần tạo offer gần nhất' của writer là trạng thái toàn tiến trình —
     lưu trong cache/ (đã trỏ sang tmp ở fixture trên) — chỉ cần reset lock."""
     monkeypatch.setattr(writer, "_create_lock", None)
+    writer._offer_block_until.clear()
     # Không để test thật sự ngủ 5s giữa xoá và tạo offer.
     monkeypatch.setattr(writer.config, "RECREATE_STEP_DELAY_SECONDS", 0)
