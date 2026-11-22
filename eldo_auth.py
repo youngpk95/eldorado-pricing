@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 # Cognito IdToken có hạn ~1h — refresh sớm ở mốc 50 phút giống bản gốc, để
 # không bao giờ vô tình dùng token đã hết hạn giữa 1 request.
 REFRESH_INTERVAL_SECONDS = 50 * 60
+# Quá mốc này coi như token đã hết hạn thật -> không dùng tiếp cookie cũ khi login lỗi.
+TOKEN_HARD_EXPIRY_SECONDS = 58 * 60
+# Login lỗi nhưng cookie cũ còn hạn: thử đăng nhập lại sau ~60 giây.
+LOGIN_FAILURE_RETRY_SECONDS = 60
+# Chờ giữa các lần thử lại trong 1 lần đăng nhập (giây).
+LOGIN_RETRY_DELAYS = (15, 45)
 
 
 class EldoradoAuth:
@@ -70,11 +76,40 @@ class EldoradoAuth:
             now = time.time()
             if self._cookie is None or self._last_auth_time is None or (now - self._last_auth_time) >= REFRESH_INTERVAL_SECONDS:
                 logger.info("[auth] Đăng nhập Eldorado (Cognito SRP)...")
-                id_token = await asyncio.to_thread(self._authenticate_sync)
+                try:
+                    id_token = await self._login_with_retry()
+                except Exception as e:
+                    # Log 2026-11-22/23: Cognito TooManyRequestsException làm cả chu kỳ lỗi.
+                    # Cookie cũ còn hạn (token ~1h, ta refresh ở 50 phút) -> dùng tiếp, thử lại sau.
+                    if self._cookie is not None and self._last_auth_time is not None and (
+                        now - self._last_auth_time
+                    ) < TOKEN_HARD_EXPIRY_SECONDS:
+                        logger.warning(
+                            "[auth] Đăng nhập lại lỗi (%s) — dùng tiếp cookie cũ (còn hạn), thử lại ở lần sau.",
+                            type(e).__name__,
+                        )
+                        self._last_auth_time = now - REFRESH_INTERVAL_SECONDS + LOGIN_FAILURE_RETRY_SECONDS
+                        return self._cookie
+                    raise
                 self._cookie = f"__Host-EldoradoIdToken={id_token}"
                 self._last_auth_time = now
                 logger.info("[auth] Đăng nhập thành công, cookie đã cập nhật.")
             return self._cookie
+
+    async def _login_with_retry(self) -> str:
+        """Đăng nhập; gặp lỗi (vd Cognito 'Too many requests') thì chờ rồi thử
+        lại tối đa LOGIN_RETRY_DELAYS — không retry dồn dập (tránh bị chặn lâu hơn)."""
+        last: Exception | None = None
+        for delay in (0, *LOGIN_RETRY_DELAYS):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return await asyncio.to_thread(self._authenticate_sync)
+            except Exception as e:  # noqa: BLE001 — mọi lỗi đăng nhập đều thử lại có giới hạn
+                last = e
+                logger.warning("[auth] Đăng nhập lỗi: %s", type(e).__name__)
+        assert last is not None
+        raise last
 
     async def get_auth_headers(self) -> dict[str, str]:
         return {"Cookie": await self.get_cookie()}

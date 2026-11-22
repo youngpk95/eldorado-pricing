@@ -302,6 +302,11 @@ async def _mark_pending_link(row_index: int, link: str) -> None:
     await asyncio.to_thread(offer_cache.mark_pending_link, row_index, link)
 
 
+# Khoảng đơn giá Eldorado chấp nhận (lỗi 400 "must fall in range between 0.00001 and 20000").
+MIN_VALID_PRICE = Decimal("0.00001")
+MAX_VALID_PRICE = Decimal("20000")
+
+
 async def _compute_target(
     cfg: RowConfig, offer: OwnOffer, client: EldoradoClient
 ) -> tuple[Decimal, int, int, list[str]]:
@@ -502,6 +507,20 @@ async def process_product(row: ProductRow, sheets: SheetsClient, client: Eldorad
         await _save_snapshot(row.index, cfg.own_listing_url, offer)
 
         new_price, new_stock, new_min_qty, note_lines = await _compute_target(cfg, offer, client)
+        if not (MIN_VALID_PRICE <= new_price <= MAX_VALID_PRICE):
+            # Log 2026-11-22 23:49: giá tính ra 0.0 -> Eldorado 400 "Invalid offer unit
+            # price" ở cả PUT lẫn POST. Không gửi lệnh nào; ghi lại số liệu để tìm nguyên nhân.
+            logger.error(
+                "[%s] Giá tính ra %s ngoài khoảng hợp lệ [%s, %s] — bỏ qua chu kỳ. price_min=%r price_max=%r "
+                "giá hiện tại=%s", cfg.name, new_price, MIN_VALID_PRICE, MAX_VALID_PRICE,
+                cfg.price_min, cfg.price_max, offer.price,
+            )
+            note_lines.insert(0, (
+                f"⚠️ Giá tính ra {new_price} nằm ngoài khoảng Eldorado cho phép ({MIN_VALID_PRICE}–{MAX_VALID_PRICE}) "
+                f"— KHÔNG gửi lệnh nào, chu kỳ sau thử lại. Kiểm tra ô Price Min/Max (đang đọc: min={cfg.price_min}, max={cfg.price_max})."
+            ))
+            await _write_result(sheets, row.index, "\n".join(note_lines), None, cfg.own_listing_url)
+            return
         update_price = new_price != offer.price
         update_stock = new_stock != offer.quantity
         update_min_qty = new_min_qty != offer.min_quantity

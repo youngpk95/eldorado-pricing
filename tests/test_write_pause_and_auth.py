@@ -265,3 +265,66 @@ async def test_seller_auth_early_refresh_failure_keeps_using_valid_token(monkeyp
     now[0] += 200  # token hết hạn thật, vẫn trong thời gian chờ thử lại -> lỗi
     with pytest.raises(EldoradoApiError):
         await auth.get_auth_headers()
+
+
+@pytest.mark.asyncio
+async def test_cognito_login_retries_then_succeeds(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(sec):
+        sleeps.append(sec)
+
+    monkeypatch.setattr(eldo_auth.asyncio, "sleep", fake_sleep)
+    auth = eldo_auth.EldoradoAuth()
+    attempts = iter([RuntimeError("TooManyRequestsException"), "TOKEN"])
+
+    def fake_login():
+        v = next(attempts)
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    monkeypatch.setattr(auth, "_authenticate_sync", fake_login)
+    assert (await auth.get_auth_headers()) == {"Cookie": "__Host-EldoradoIdToken=TOKEN"}
+    assert sleeps == [eldo_auth.LOGIN_RETRY_DELAYS[0]]
+
+
+@pytest.mark.asyncio
+async def test_cognito_login_failure_keeps_valid_old_cookie(monkeypatch):
+    async def no_sleep(sec):
+        pass
+
+    monkeypatch.setattr(eldo_auth.asyncio, "sleep", no_sleep)
+    now = [1000.0]
+    monkeypatch.setattr(eldo_auth.time, "time", lambda: now[0])
+    auth = eldo_auth.EldoradoAuth()
+    monkeypatch.setattr(auth, "_authenticate_sync", lambda: "OLD")
+    await auth.get_auth_headers()
+
+    def boom():
+        raise RuntimeError("TooManyRequestsException")
+
+    monkeypatch.setattr(auth, "_authenticate_sync", boom)
+    now[0] += eldo_auth.REFRESH_INTERVAL_SECONDS + 1  # tới hạn refresh, token cũ vẫn còn hạn
+    assert (await auth.get_auth_headers()) == {"Cookie": "__Host-EldoradoIdToken=OLD"}
+
+
+@pytest.mark.asyncio
+async def test_cognito_login_failure_raises_when_old_cookie_expired(monkeypatch):
+    async def no_sleep(sec):
+        pass
+
+    monkeypatch.setattr(eldo_auth.asyncio, "sleep", no_sleep)
+    now = [1000.0]
+    monkeypatch.setattr(eldo_auth.time, "time", lambda: now[0])
+    auth = eldo_auth.EldoradoAuth()
+    monkeypatch.setattr(auth, "_authenticate_sync", lambda: "OLD")
+    await auth.get_auth_headers()
+
+    def boom():
+        raise RuntimeError("TooManyRequestsException")
+
+    monkeypatch.setattr(auth, "_authenticate_sync", boom)
+    now[0] += eldo_auth.TOKEN_HARD_EXPIRY_SECONDS + 1
+    with pytest.raises(RuntimeError):
+        await auth.get_auth_headers()

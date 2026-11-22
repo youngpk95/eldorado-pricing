@@ -700,3 +700,27 @@ async def test_process_product_recovery_waits_while_create_quota_blocked(monkeyp
     assert link is None
     assert "CHƯA tạo lại" in note
     assert "Eldorado đang chặn tạo offer" in note
+
+
+@pytest.mark.asyncio
+async def test_process_product_skips_all_writes_when_computed_price_is_zero(monkeypatch):
+    """Log 2026-11-22 23:49: giá tính ra 0.0 -> Eldorado 400 ở mọi lệnh ghi. Không gửi gì."""
+    import product_pipeline
+    monkeypatch.setattr(config, "DRY_RUN", False)
+    own_offer = make_own_offer(price="120", quantity=200)
+    urls = OfferUrls(detail="d", compare="c", update="u", change="ch")
+    client = AsyncMock()
+    client.get_own_offer.return_value = (own_offer, urls)
+
+    async def fake_target(cfg, offer, c):
+        return Decimal("0"), 200, 1, ["Đối thủ rẻ nhất hợp lệ: X = 0"]
+
+    monkeypatch.setattr(product_pipeline, "_compute_target", fake_target)
+    sheets = FakeSheets()
+    await process_product(make_row(), sheets, client)
+
+    client.put.assert_not_called()
+    client.post.assert_not_called()
+    client.delete.assert_not_called()
+    assert len(sheets.writes) == 1
+    assert "ngoài khoảng Eldorado cho phép" in sheets.writes[0][1]
