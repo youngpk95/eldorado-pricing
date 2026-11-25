@@ -208,5 +208,8 @@ def build_auth(user_agent: str):
     if config.USE_SELLER_API:
         logger.info("[auth] Dùng Seller API chính thức (client credentials).")
         return SellerApiAuth(config.ELDORADO_SELLER_CLIENT_ID.strip(), config.ELDORADO_SELLER_CLIENT_SECRET.strip(), user_agent)
-    logger.info("[auth] Dùng đăng nhập Cognito SRP (email/mật khẩu).")
+    logger.warning(
+        "[auth] Đang dùng đăng nhập Cognito SRP (phương thức CŨ) — Eldorado thông báo sẽ tắt "
+        "(26/11/2026 UTC). Hãy thêm ELDORADO_SELLER_CLIENT_ID/SECRET vào .env (owner tạo)."
+    )
     return EldoradoAuth()
